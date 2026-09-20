@@ -61,6 +61,8 @@ cd claude-clipboard-ssh
 nix develop -c zig build
 ```
 
+Other clone URLs are in [Where this lives](#where-this-lives).
+
 `zig-out/bin/claude-wrap` finds its stub relative to its own location, so the
 build tree can be run in place. To install by hand, copy both programs into
 one directory — `claude-wrap` falls back to looking beside itself:
@@ -197,6 +199,27 @@ nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
   An image beats a URL if both are on the clipboard.
 - **No tmux or screen support.** OSC 5522 does not pass through a
   multiplexer's byte filter by default.
+
+## Where this lives
+
+The same history, in four places. GitHub is where the CI runs and where
+issues and pull requests are read.
+
+| | |
+| --- | --- |
+| GitHub | <https://github.com/jcollie/claude-clipboard-ssh> |
+| Forgejo | <https://git.jcollie.dev/jeff/claude-clipboard-ssh> |
+| Tangled | <https://tangled.org/jcollie.dev/claude-clipboard-ssh> |
+| Radicle | `rad:z2GK8VisdkuFiMErcbvp8wGyRWoKW` |
+
+```sh
+git clone https://github.com/jcollie/claude-clipboard-ssh.git
+git clone https://git.jcollie.dev/jeff/claude-clipboard-ssh.git
+rad clone rad:z2GK8VisdkuFiMErcbvp8wGyRWoKW
+```
+
+A Radicle repository is findable only by its ID, so the line above is the
+one thing a reader needs in order to seed or clone it.
 
 ## License
 
