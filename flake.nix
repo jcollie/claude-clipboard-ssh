@@ -12,12 +12,20 @@
       url = "github:jcollie/zon2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Only so that `nix flake check` can evaluate the home-manager module
+    # against the real thing. Nothing in the package depends on it.
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
     {
+      self,
       nixpkgs,
       zon2nix,
+      home-manager,
       ...
     }:
     let
@@ -60,6 +68,78 @@
           claude-clipboard-ssh = pkgs.callPackage ./package.nix { };
           default = claude-clipboard-ssh;
           zig-deps = pkgs.callPackage ./build.zig.zon.nix { };
+        }
+      );
+
+      homeModules = {
+        claude-clipboard-ssh = import ./home-manager.nix { inherit self; };
+        default = self.homeModules.claude-clipboard-ssh;
+      };
+
+      overlays.default = final: _prev: {
+        claude-clipboard-ssh = final.callPackage ./package.nix { };
+      };
+
+      # A home-manager module that does not evaluate is the usual way one of
+      # these breaks, and nothing else here would catch it. `claude-code` is
+      # unfree, so this pkgs instance says so.
+      checks = lib.genAttrs (lib.filter (lib.hasSuffix "-linux") lib.systems.flakeExposed) (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+          };
+          homeConfig =
+            module:
+            (home-manager.lib.homeManagerConfiguration {
+              inherit pkgs;
+              modules = [
+                self.homeModules.default
+                {
+                  home = {
+                    username = "test";
+                    homeDirectory = "/home/test";
+                    stateVersion = "24.11";
+                  };
+                }
+                module
+              ];
+            }).activationPackage;
+        in
+        {
+          # The integration that matters: claude-wrap is pointed at the very
+          # claude that programs.claude-code installed.
+          home-manager-with-claude-code = homeConfig {
+            programs.claude-code = {
+              enable = true;
+              settings.theme = "dark";
+            };
+            programs.claude-clipboard-ssh.enable = true;
+            programs.fish.enable = true;
+          };
+
+          # claude-code managing settings but installing nothing:
+          # `programs.claude-code.package` is nullable, and in that case
+          # `finalPackage` has no value at all, so reading it unguarded is an
+          # eval error rather than a null.
+          home-manager-claude-code-without-package = homeConfig {
+            programs.claude-code = {
+              enable = true;
+              package = null;
+              settings.theme = "dark";
+            };
+            programs.claude-clipboard-ssh.enable = true;
+          };
+
+          # And it still evaluates when claude-code is not in use at all.
+          home-manager-without-claude-code = homeConfig {
+            programs.claude-clipboard-ssh = {
+              enable = true;
+              claudeBin = "/home/test/.local/bin/claude";
+            };
+            programs.bash.enable = true;
+          };
         }
       );
 

@@ -53,6 +53,44 @@ package installs `bin/claude-wrap` and
 `libexec/claude-clipboard-ssh/xclip`. Nothing shadows the system `xclip`:
 the stub is not on your `PATH`, only on the one `claude` is given.
 
+### With home-manager
+
+The flake exposes `homeModules.default`, which installs the two programs and
+wires them to `programs.claude-code`. Enable it in the home configuration of
+the **remote** machine — the one you ssh into and run `claude` on.
+
+```nix
+{
+  inputs.claude-clipboard-ssh.url = "github:jcollie/claude-clipboard-ssh";
+
+  # ... in your home configuration:
+  imports = [ inputs.claude-clipboard-ssh.homeModules.default ];
+
+  programs.claude-code.enable = true;
+  programs.claude-clipboard-ssh.enable = true;
+}
+```
+
+That is the whole configuration. `claude-wrap` is told to run exactly the
+`claude` that `programs.claude-code` installed, by way of its
+`finalPackage` — so the wrapper does not have to guess, which is otherwise
+the fragile part: left alone it searches `~/.local/share/claude/versions`,
+`~/.claude/local` and then the `PATH`. `claude` is also aliased to
+`claude-wrap` in every enabled shell, which is safe as a blanket alias
+because the wrapper `exec`s straight through on a terminal without OSC 5522.
+
+| Option | Default | |
+| --- | --- | --- |
+| `enable` | `false` | |
+| `package` | this flake's | The package to install. |
+| `claudeBin` | from `programs.claude-code` | The `claude` to run, exported as `CLAUDE_WRAP_CLAUDE_BIN`. `null` lets the wrapper search. |
+| `aliasClaude` | `true` | Alias `claude` to `claude-wrap` in bash, zsh and fish. |
+| `kittyClipboardControl` | `false` | Set kitty's `clipboard_control` to allow reads without a prompt. Only meaningful on the machine you sit at. |
+
+If `programs.claude-code` is not installing a package — it is nullable, for
+people who use it only to write settings — the module says so as a warning
+and leaves the wrapper to search. Set `claudeBin` to be explicit instead.
+
 ### From source
 
 ```sh
