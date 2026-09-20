@@ -87,10 +87,32 @@ pub fn main(init: std.process.Init) !u8 {
         log.print("no shim dir found; image paste will not work", .{});
     }
 
-    // Nothing to intercept on a terminal without OSC 5522, so get out of the
-    // way completely rather than holding claude in a pty for no reason.
-    if (!ccssh.isSupportedTerminal(env)) {
-        log.print("not ghostty or kitty; exec'ing claude directly", .{});
+    // Get out of the way entirely unless there is something to gain.
+    //
+    // Two conditions, and the SSH one is not an optimisation. Enabling mode
+    // 5522 makes the terminal stop sending pasted text and send a paste
+    // event instead, so from that moment every paste depends on this
+    // wrapper handling the exchange correctly -- there is no longer any
+    // text for it to fall back to. On a local session the terminal and
+    // Claude Code already manage the clipboard between themselves, so that
+    // is a risk taken for no benefit.
+    const forced = if (env.get("CLAUDE_WRAP_FORCE")) |v|
+        v.len > 0 and !std.mem.eql(u8, v, "0")
+    else
+        false;
+    const supported = ccssh.isSupportedTerminal(env);
+    const over_ssh = ccssh.isOverSsh(env);
+
+    if (!supported or !(over_ssh or forced)) {
+        if (!supported) {
+            log.print("terminal has no OSC 5522; exec'ing claude directly", .{});
+        } else {
+            log.print(
+                "local session, nothing to bridge; exec'ing claude directly " ++
+                    "(set CLAUDE_WRAP_FORCE=1 to override)",
+                .{},
+            );
+        }
         const slice_argv = try arena.alloc([]const u8, argv_vec.len);
         slice_argv[0] = real;
         for (argv_vec[1..], 1..) |a, i| slice_argv[i] = std.mem.span(a);
@@ -384,26 +406,33 @@ const Paste = struct {
             .idle => {
                 if (!std.mem.eql(u8, status, "OK")) return;
                 p.clear();
-                if (packet.field("password")) |pw| p.password = try gpa.dupe(u8, pw);
+                // `pw` is what the terminal writes. `password` is the
+                // spelling an earlier ghostty used, kept because reading
+                // the wrong one costs the whole paste: without a password
+                // the follow-up read is refused, and by then the terminal
+                // has already replaced the bracketed paste with this event,
+                // so there is no text left to fall back to.
+                const pw = packet.field("pw") orelse packet.field("password");
+                if (pw) |v| p.password = try gpa.dupe(u8, v);
                 log.print("paste event; password={}", .{p.password != null});
                 p.state = .collecting_paste;
             },
 
             .collecting_paste => {
                 if (std.mem.eql(u8, status, "DATA")) {
-                    const m64 = packet.field("mime") orelse return;
-                    const m = ccssh.b64DecodeAlloc(gpa, m64) catch |e| {
-                        log.print("undecodable mime advertisement: {t}", .{e});
-                        return;
-                    };
-                    try p.mimes.append(gpa, m);
+                    ccssh.collectAdvertisedMimes(gpa, packet, &p.mimes) catch |e|
+                        log.print("undecodable advertisement: {t}", .{e});
                     return;
                 }
                 if (!std.mem.eql(u8, status, "DONE")) return;
 
                 const idx = ccssh.chooseMime(p.mimes.items) orelse {
-                    log.print("no usable MIME type offered", .{});
-                    ccssh.writeAllFd(master, "\x1b[200~\x1b[201~") catch {};
+                    // Nothing to send. Deliberately *not* an empty
+                    // bracketed paste: mode 5522 has already replaced the
+                    // real paste with this event, so writing an empty one
+                    // is how a paste gets silently thrown away rather than
+                    // merely unhandled.
+                    log.print("no usable MIME type among {d} offered", .{p.mimes.items.len});
                     p.reset();
                     return;
                 };
@@ -466,19 +495,26 @@ const Paste = struct {
     }
 };
 
-/// Ask the terminal for one MIME type. ghostty wants the password in the
-/// metadata; kitty takes the base64 type as the payload and has no password.
+/// Ask the terminal for one MIME type.
+///
+/// The requested types go in the *payload*, whitespace-separated and base64
+/// encoded -- not in a `mime=` metadata field, which is only how the
+/// terminal labels the data coming back. A password is accompanied by
+/// `name=`, because a terminal discards a password that arrives without a
+/// human-readable name to show.
 fn sendReadRequest(gpa: Allocator, mime: []const u8, password: ?[]const u8) !void {
     const m64 = try ccssh.b64EncodeAlloc(gpa, mime);
     defer gpa.free(m64);
 
     var seq: std.ArrayList(u8) = .empty;
     defer seq.deinit(gpa);
+    try seq.appendSlice(gpa, "\x1b]5522;type=read");
     if (password) |pw| {
-        try seq.print(gpa, "\x1b]5522;type=read:mime={s}:password={s}\x1b\\", .{ m64, pw });
-    } else {
-        try seq.print(gpa, "\x1b]5522;type=read;{s}\x1b\\", .{m64});
+        const name64 = try ccssh.b64EncodeAlloc(gpa, ccssh.program_name);
+        defer gpa.free(name64);
+        try seq.print(gpa, ":name={s}:pw={s}", .{ name64, pw });
     }
+    try seq.print(gpa, ";{s}\x1b\\", .{m64});
     ccssh.writeAllFd(posix.STDOUT_FILENO, seq.items) catch {};
 }
 

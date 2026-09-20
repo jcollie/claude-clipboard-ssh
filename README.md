@@ -156,6 +156,7 @@ Paste a screenshot the way you would locally. It attaches.
 | --- | --- |
 | `CLAUDE_WRAP_CLAUDE_BIN` | Use this `claude` instead of searching for one. |
 | `CLAUDE_CLIPBOARD_SHIM_DIR` | Use this directory for the `xclip` stub. |
+| `CLAUDE_WRAP_FORCE` | Engage even when not over SSH. |
 | `XDG_RUNTIME_DIR` | Where the clipboard cache lives (resolved via known-folders). |
 | `XDG_STATE_HOME` | Where `claude-wrap.log` and `xclip-shim.log` are appended. |
 
@@ -220,11 +221,22 @@ nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
   libSystem, because its syscall ABI is private and that is the only
   supported way in.)
 - kitty out of the box.
-- ghostty needs [PR #12030](https://github.com/ghostty-org/ghostty/pull/12030),
-  which implements the OSC 5522 read path and was **closed without being
-  merged** — so a stock ghostty build will not answer, and the wrapper falls
-  back as it would on any other terminal.
+- ghostty 1.3.x and later, which ships the kitty clipboard protocol and
+  registers mode 5522 as `kitty_paste_events`. (An earlier
+  [PR #12030](https://github.com/ghostty-org/ghostty/pull/12030) was closed
+  unmerged; the feature arrived separately.) ghostty's `clipboard-read`
+  defaults to `ask`, but a paste event carries a one-time password, so the
+  follow-up read is granted without a prompt.
 - Any other terminal: falls back to `exec`ing `claude`.
+
+**The wrapper only engages over SSH.** Enabling mode 5522 makes the terminal
+stop sending pasted text and send a paste *event* instead, so from that point
+every paste depends on the wrapper handling the exchange — there is no text
+left to fall back to. Locally the terminal and Claude Code already manage the
+clipboard between themselves, so that risk buys nothing, and the wrapper
+`exec`s straight through. Set `CLAUDE_WRAP_FORCE=1` to engage anyway, which
+is worth doing if the local clipboard does not work for you either — a
+Wayland session with no XWayland for `xclip` to talk to, say.
 
 ## Known limitations
 
@@ -278,7 +290,8 @@ Copyright © 2026 mindfulmonk and Jeffrey C. Ollie.
   protocol definition.
 - Jarred-Sumner. "terminal: implement kitty clipboard protocol read path (OSC
   5522)." *ghostty* pull request 12030, 1 April 2026.
-  <https://github.com/ghostty-org/ghostty/pull/12030>. Closed unmerged.
+  <https://github.com/ghostty-org/ghostty/pull/12030>. Closed unmerged; the
+  feature reached ghostty by another route.
 - MichielMAnalytics. "Support OSC 52/5522 clipboard for image paste over SSH."
   *claude-code* issue 42712, 2 April 2026.
   <https://github.com/anthropics/claude-code/issues/42712>. Closed as not

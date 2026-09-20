@@ -161,6 +161,66 @@ pub fn parse5522(osc: []const u8) ?Packet {
     return .{ .meta = rest, .payload = null };
 }
 
+/// The pseudo-type that means "tell me what is on offer" rather than naming
+/// a representation. A paste event advertises its types as the payload of a
+/// single DATA packet carrying this as its `mime`.
+pub const targets_mime = ".";
+
+/// The human-readable program name sent alongside a password. ghostty
+/// discards a password that arrives without one -- "specifying a password
+/// without a human friendly name is the same as not specifying a password"
+/// -- so this is required, not decoration.
+pub const program_name = "claude-wrap";
+
+/// Split a whitespace-separated MIME list, which is how both the advertised
+/// types and a read request's requested types are carried.
+pub fn mimeListIterator(list: []const u8) std.mem.TokenIterator(u8, .any) {
+    return std.mem.tokenizeAny(u8, list, " \t\r\n");
+}
+
+/// Collect the MIME types one DATA packet of a paste event advertises.
+///
+/// Two shapes have to be understood. A paste event lists everything in a
+/// single packet whose `mime` is the targets pseudo-type and whose payload
+/// is the whitespace-separated list; a terminal may instead name one type
+/// per packet in the `mime` field. Reading only the second shape finds just
+/// "." and concludes the clipboard holds nothing usable, which is how a
+/// working paste turns into a discarded one.
+///
+/// Appends to `out`, which owns the added strings.
+pub fn collectAdvertisedMimes(
+    gpa: Allocator,
+    packet: Packet,
+    out: *std.ArrayList([]u8),
+) !void {
+    const m64 = packet.field("mime") orelse return;
+    const mime = try b64DecodeAlloc(gpa, m64);
+
+    if (!std.mem.eql(u8, mime, targets_mime)) {
+        try out.append(gpa, mime); // one type, named in the field
+        return;
+    }
+    defer gpa.free(mime);
+
+    const list64 = packet.payload orelse return;
+    const list = try b64DecodeAlloc(gpa, list64);
+    defer gpa.free(list);
+
+    var it = mimeListIterator(list);
+    while (it.next()) |one| try out.append(gpa, try gpa.dupe(u8, one));
+}
+
+/// Whether this session came in over SSH, which is the only situation the
+/// wrapper helps in. Locally the terminal and Claude Code manage the
+/// clipboard between themselves, and interposing a pty then only adds ways
+/// for a paste to go wrong.
+pub fn isOverSsh(env: *const std.process.Environ.Map) bool {
+    for ([_][]const u8{ "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY" }) |name| {
+        if (env.get(name)) |v| if (v.len > 0) return true;
+    }
+    return false;
+}
+
 // ------------------------------------------------------------ MIME choice
 
 /// Most to least wanted. TIFF is deliberately absent: a macOS screenshot is
@@ -553,6 +613,64 @@ test "baseMime is what the cache is keyed on" {
     const name = try mimeToFileName(gpa, baseMime("text/plain;charset=utf-8"));
     defer gpa.free(name);
     try std.testing.expectEqualStrings("text_plain", name);
+}
+
+test "mimeListIterator splits the advertisement the way the terminal writes it" {
+    var it = mimeListIterator("text/plain;charset=utf-8 image/png text/html\n");
+    try std.testing.expectEqualStrings("text/plain;charset=utf-8", it.next().?);
+    try std.testing.expectEqualStrings("image/png", it.next().?);
+    try std.testing.expectEqualStrings("text/html", it.next().?);
+    try std.testing.expect(it.next() == null);
+}
+
+test "collectAdvertisedMimes reads a real ghostty paste-event listing" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList([]u8) = .empty;
+    defer {
+        for (out.items) |m| gpa.free(m);
+        out.deinit(gpa);
+    }
+
+    // Exactly what ghostty writes: the targets pseudo-type in `mime`
+    // (base64 "."), the list in the payload, and `pw` -- not `password`.
+    const listing = "\x1b]5522;type=read:status=DATA:mime=Lg==:pw=b3RwCg==;" ++
+        "dGV4dC9wbGFpbjtjaGFyc2V0PXV0Zi04IGltYWdlL3BuZwo=\x1b\\";
+    const packet = parse5522(listing).?;
+    try std.testing.expectEqualStrings("b3RwCg==", packet.field("pw").?);
+    try std.testing.expect(packet.field("password") == null);
+
+    try collectAdvertisedMimes(gpa, packet, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqualStrings("text/plain;charset=utf-8", out.items[0]);
+    try std.testing.expectEqualStrings("image/png", out.items[1]);
+
+    // And the image wins the preference, as it must for a screenshot.
+    const view = try gpa.alloc([]const u8, out.items.len);
+    defer gpa.free(view);
+    for (out.items, 0..) |m, i| view[i] = m;
+    try std.testing.expectEqual(@as(?usize, 1), chooseMime(view));
+}
+
+test "collectAdvertisedMimes also accepts one type per packet" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList([]u8) = .empty;
+    defer {
+        for (out.items) |m| gpa.free(m);
+        out.deinit(gpa);
+    }
+    const one = "\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n\x1b\\";
+    try collectAdvertisedMimes(gpa, parse5522(one).?, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqualStrings("image/png", out.items[0]);
+}
+
+test "isOverSsh" {
+    const gpa = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try std.testing.expect(!isOverSsh(&env));
+    try env.put("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22");
+    try std.testing.expect(isOverSsh(&env));
 }
 
 test "compareVersionNames orders numerically, not lexicographically" {
