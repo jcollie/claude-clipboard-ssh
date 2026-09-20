@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+# SPDX-License-Identifier: MIT
+
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The remote that `claude` actually runs on.
+          - runner: ubuntu-latest
+            name: linux
+          # The other supported remote: ssh'ing into a Mac, where the wrapper
+          # writes pastes to NSPasteboard instead of the xclip cache. Nothing
+          # else in the matrix would catch a Darwin-only compile error.
+          - runner: macos-latest
+            name: darwin
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+
+      - name: Check REUSE compliance
+        run: nix develop -c reuse lint
+
+      - name: Check Zig formatting compliance
+        run: nix develop -c zig fmt --check .
+
+      - name: Test
+        run: nix develop -c zig build test --summary all
+
+      - name: Build the package
+        run: nix build --print-build-logs

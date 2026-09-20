@@ -1,175 +1,232 @@
+<!--
+SPDX-FileCopyrightText: © 2026 mindfulmonk <mindfulmonk@users.noreply.github.com>
+SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+SPDX-License-Identifier: MIT
+-->
+
 # claude-clipboard-ssh
 
 Image paste over SSH for Claude Code, by speaking
-[OSC 5522](https://sw.kovidgoyal.net/kitty/clipboard/) to kitty or ghostty
-on the user's local machine. No patches to Claude Code itself.
+[OSC 5522](https://sw.kovidgoyal.net/kitty/clipboard/) to kitty or ghostty on
+the user's local machine. No patches to Claude Code itself.
+
+This is a Zig port of [mindfulmonk/claude-clipboard-ssh][upstream], which
+worked out the protocol and the architecture; see [`BLOG.md`](BLOG.md) for
+that write-up. The port adds Nix packaging, a test suite, and an install
+layout that does not require the `xclip` stub to shadow the real one
+system-wide.
+
+[upstream]: https://github.com/mindfulmonk/claude-clipboard-ssh
 
 ## What this is
 
-Claude Code shells out to `xclip` to read the system clipboard on Linux.
-That works locally, but over SSH there's no display server on the remote
-box and the paste silently fails. Upstream
+Claude Code shells out to `xclip` to read the system clipboard on Linux. That
+works locally, but over SSH there is no display server on the remote box and
+the paste silently fails. Upstream
 [claude-code#42712](https://github.com/anthropics/claude-code/issues/42712)
-tracks this; it's closed as "not planned."
+tracks it; it is closed as "not planned".
 
-This repo is a two-piece userspace workaround:
+Two programs work around it:
 
-- **`bin/xclip`** — a drop-in replacement for `xclip` that PATH-shadows the
-  real one. It serves bytes from a small cache directory written by the
-  wrapper.
-- **`bin/claude-wrap`** — a PTY proxy that wraps `claude`. It enables
-  `CSI ? 5522 h` on the outer terminal, intercepts the OSC 5522 paste-event
-  packets ghostty/kitty send, fetches the clipboard data, writes it to the
-  cache, then sends Ctrl+V to the inner `claude` so its xclip flow fires
-  and the cache gets read.
+- **`claude-wrap`** — a pty proxy around `claude`. It enables `CSI ? 5522 h`
+  on the outer terminal, intercepts the OSC 5522 paste-event packets that
+  ghostty and kitty send, fetches the clipboard data, writes it to a cache
+  directory, and then sends Ctrl+V to the inner `claude` so its normal
+  clipboard flow fires.
+- **`xclip`** — a drop-in stub that serves from that cache. `claude-wrap`
+  puts its directory at the front of the `PATH` it hands the child, so the
+  stub shadows the real `xclip` for Claude Code and for nothing else.
 
-Together they let Cmd+V (or your normal paste shortcut) attach screenshots
-to a `claude` session that's running over SSH.
+Together they let you paste screenshots into a `claude` session running over
+SSH.
 
 ## Install
 
+### With Nix
+
 ```sh
-# Put the wrapper + the clipboard stub for your remote OS on PATH.
-mkdir -p ~/.local/bin
-cp bin/claude-wrap ~/.local/bin/claude-wrap
-chmod +x ~/.local/bin/claude-wrap
-
-# Linux remote:
-cp bin/xclip ~/.local/bin/xclip
-chmod +x ~/.local/bin/xclip
-
-# macOS remote (ssh'ing into a Mac): nothing extra to install.
-# claude-wrap writes pasted images straight to the remote Mac's
-# NSPasteboard via osascript, which is what claude reads on darwin.
-
-# Make sure ~/.local/bin is in PATH and earlier than any system xclip
-echo $PATH | tr ':' '\n' | head -3
+nix profile install github:jcollie/claude-clipboard-ssh
 ```
 
-Optional, but recommended: silence the kitty clipboard popup. In
-`~/.config/kitty/kitty.conf` on the Mac side:
+or as a flake input, with `packages.<system>.claude-clipboard-ssh`. The
+package installs `bin/claude-wrap` and
+`libexec/claude-clipboard-ssh/xclip`. Nothing shadows the system `xclip`:
+the stub is not on your `PATH`, only on the one `claude` is given.
+
+### From source
+
+```sh
+git clone https://github.com/jcollie/claude-clipboard-ssh.git
+cd claude-clipboard-ssh
+nix develop -c zig build
+```
+
+`zig-out/bin/claude-wrap` finds its stub relative to its own location, so the
+build tree can be run in place. To install by hand, copy both programs into
+one directory — `claude-wrap` falls back to looking beside itself:
+
+```sh
+mkdir -p ~/.local/bin
+cp zig-out/bin/claude-wrap ~/.local/bin/
+cp zig-out/libexec/claude-clipboard-ssh/xclip ~/.local/bin/
+```
+
+That layout does put a fake `xclip` on your own `PATH`, which is why the Nix
+package does not use it.
+
+### On a macOS remote
+
+Nothing extra. Claude Code on darwin reads images from the NSPasteboard with
+`osascript` rather than shelling out to `xclip`, so `claude-wrap` writes
+pasted images straight there and the stub is never consulted.
+
+### Terminal configuration
+
+Recommended on the machine you are sitting at, to silence kitty's
+per-paste confirmation dialog. In `~/.config/kitty/kitty.conf`:
 
 ```
 clipboard_control write-clipboard write-primary read-clipboard read-primary
 ```
 
-Reload kitty (`Ctrl+Shift+F5` or restart). Without this, kitty pops up a
-confirm dialog for every paste, which gets annoying.
+Without it kitty prompts on every paste, and a slow prompt can push the round
+trip past ghostty's five-second password lifetime.
 
 ## Usage
 
-SSH into your remote Linux box from a kitty or ghostty terminal on your
-Mac, then:
+SSH into the remote box from kitty or ghostty, then:
 
 ```sh
 claude-wrap
 ```
 
-`claude-wrap` auto-detects ghostty/kitty and engages the OSC 5522 bridge.
-On any other terminal it just `exec`s the real `claude` with zero
-overhead, so it's safe to alias as `claude`:
+It passes every argument through to `claude`. On a terminal that does not
+implement OSC 5522 it `exec`s `claude` directly and adds no pty and no
+overhead, so it is safe to alias:
 
 ```sh
-# ~/.bashrc
 alias claude=claude-wrap
 ```
 
-Paste a screenshot the same way you would locally. It attaches.
+Paste a screenshot the way you would locally. It attaches.
+
+### Environment
+
+| Variable | Effect |
+| --- | --- |
+| `CLAUDE_WRAP_CLAUDE_BIN` | Use this `claude` instead of searching for one. |
+| `CLAUDE_CLIPBOARD_SHIM_DIR` | Use this directory for the `xclip` stub. |
+| `XDG_RUNTIME_DIR` | Where the clipboard cache lives (resolved via known-folders). |
+| `XDG_STATE_HOME` | Where `claude-wrap.log` and `xclip-shim.log` are appended. |
 
 ## Architecture
 
 ```
-[kitty OR ghostty]  ←tty→  [claude-wrap]  ←pty→  [real claude]
-                              │ writes bytes
-                              ↓
-                       $XDG_RUNTIME_DIR/xclip-shim-<uid>/
-                              ↑
-                              │ reads bytes
-                          [xclip stub]  ← claude shells out
+[kitty OR ghostty]  <--tty-->  [claude-wrap]  <--pty-->  [real claude]
+                                   | writes bytes
+                                   v
+                          $XDG_RUNTIME_DIR/xclip-shim-<uid>/
+                                   ^
+                                   | reads bytes
+                               [xclip stub]  <-- claude shells out
 ```
 
-The wrapper:
+ghostty's OSC 5522 is per-paste authenticated: when the user pastes, the
+terminal hands the foreground application a single-use password and gives it
+five seconds to ask for the bytes. An application that does not speak the
+protocol, and shells out to `xclip` some time later, cannot participate —
+by then the password is gone. So something has to be reading stdin at the
+moment of the gesture, which is what the proxy is for. kitty's version of the
+protocol has the same shape without the password, so one mechanism covers
+both terminals.
 
-1. Detects the terminal via `$GHOSTTY_RESOURCES_DIR`, `$KITTY_WINDOW_ID`,
-   `$TERM_PROGRAM`, `$TERM`. Exits to real `claude` on others.
-2. `pty.fork()` real `claude` as a child.
-3. Sends `CSI ? 5522 h` to the outer terminal so it switches to OSC 5522
-   paste mode.
-4. Runs a `select()` proxy loop forwarding bytes in both directions, with
-   a state machine sniffing for OSC 5522 packets on the inbound side.
-5. On a paste event:
-   - Captures the password (ghostty) or notes absence (kitty)
-   - Picks the highest-priority MIME from the advertisement
-   - Fires the `type=read` request back, with password if present
-   - Accumulates the chunked data response
-   - Writes the decoded bytes to the cache directory
-   - Sends `\x16` (Ctrl+V) to `claude`'s PTY
+Ctrl+V, not a synthesised bracketed paste, is what makes Claude Code go and
+read the clipboard; bracketed paste is treated as ordinary text input.
 
-Ctrl+V is Claude Code's paste binding, so it triggers Claude's normal
-xclip flow — which hits our stub, which serves from the freshly-written
-cache. Image attaches.
+## Development
 
-The shim is ~170 lines and contains no OSC logic — that's all in the
-wrapper. See `BLOG.md` for the longer write-up.
+```sh
+nix develop            # zig 0.16, reuse, zon2nix
+zig build              # all five programs into zig-out
+zig build test         # unit tests and the scanner property test
+zig build check        # compile everything without running it
+zig build fmt          # zig fmt --check
+reuse lint             # licensing compliance
+```
+
+`zig build` also produces three debug tools in `zig-out/bin`, which the Nix
+package deliberately does not install:
+
+- `ccssh-probe` — raw OSC 52 / OSC 5522 sender and receiver, no `claude`.
+- `ccssh-ghostty-test` — the paste exchange in isolation; writes what it
+  fetches to a file.
+- `ccssh-dump-paste` — hexdumps every byte the terminal sends on a paste.
+
+Zig dependencies are declared in `build.zig.zon` and mirrored for Nix in
+`build.zig.zon.nix`. Regenerate the latter after any dependency change:
+
+```sh
+nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
+```
 
 ## Compatibility
 
-Tested with:
-
-- macOS host running kitty (latest)
-- macOS host running ghostty with
-  [PR #12030](https://github.com/ghostty-org/ghostty/pull/12030) (OSC 5522
-  read-path support; not yet merged at time of writing)
-- Linux remote (Arch) running Claude Code over SSH
-
-Should work with any terminal that implements OSC 5522. Falls back gracefully
-to a direct `exec` of `claude` on terminals that don't.
+- Linux and macOS remotes, x86-64 and aarch64.
+- **No C library dependency on Linux.** `posix_openpt`, `grantpt`,
+  `unlockpt` and `ptsname` are not system calls — each is a short libc
+  function around an `open` and one or two ioctls, and the programs issue
+  those ioctls themselves. The Linux binaries are therefore static and can
+  be copied to a remote box that has nothing installed. (Darwin still links
+  libSystem, because its syscall ABI is private and that is the only
+  supported way in.)
+- kitty out of the box.
+- ghostty needs [PR #12030](https://github.com/ghostty-org/ghostty/pull/12030),
+  which implements the OSC 5522 read path and was **closed without being
+  merged** — so a stock ghostty build will not answer, and the wrapper falls
+  back as it would on any other terminal.
+- Any other terminal: falls back to `exec`ing `claude`.
 
 ## Known limitations
 
-- **Depends on Ctrl+V being Claude Code's paste binding.** This is
-  [documented behavior](https://code.claude.com/docs/en/interactive-mode)
-  (use Ctrl+V, not Cmd+V — the terminal eats Cmd+V before Claude sees it).
-  If Anthropic ever changes the binding, the wrapper needs the keystroke
-  updated.
-- **Image-write to clipboard isn't supported.** `xclip -i` falls back to
-  OSC 52 which is text-only. Claude Code doesn't seem to need it.
-- **One MIME per paste in ghostty.** ghostty's password is single-use, so
-  the wrapper fetches exactly one MIME (PNG preferred). If your clipboard
-  has both an image and a URL, only the image comes through.
-- **No tmux/screen support.** OSC 5522 won't pass through a multiplexer's
-  byte filter by default. The wrapper would need different routing.
-- **Keystrokes typed during the OSC round-trip can be eaten** in some
-  edge cases involving slow clipboard popups. Set `clipboard_control` to
-  drop the `-ask` modifier to minimize the window.
-
-## Debug tools
-
-In `tools/`:
-
-- `probe.py` — raw OSC 5522 sender/receiver, no claude. Useful for
-  exercising the protocol against any terminal.
-- `ghostty-test.py` — minimal mode-5522 paste capture. Run it, paste, get
-  a file. No proxy, no claude. Reproduces the protocol in isolation.
-- `dump-paste.py` — dumps every byte the terminal sends on a paste. Useful
-  for figuring out what trigger a TUI app actually expects.
-
-## Why
-
-ghostty's OSC 5522 is per-paste authenticated: the terminal hands the TUI
-app a single-use token, the app has 5 seconds to use it. Closed-source
-TUIs that don't speak the protocol natively can't participate in this
-model — by the time the app shells out to xclip, the token's already
-gone. The PTY-proxy wrapper exists to bridge that gap: it captures the
-token at the user-gesture moment, on behalf of an app that doesn't know
-to expect one.
-
-kitty has a simpler ambient-capability model, but the same wrapper works
-there too (with the password path skipped), so a single mechanism covers
-both terminals.
-
-See `BLOG.md` for the full debugging journey.
+- **Depends on Ctrl+V being Claude Code's paste binding**, which is
+  [documented behavior](https://code.claude.com/docs/en/interactive-mode).
+  If that changes, the wrapper needs the keystroke updated.
+- **No image write.** `xclip -i` falls back to OSC 52, which is text-only.
+  Claude Code does not appear to need it.
+- **One MIME type per paste in ghostty**, because the password is single-use.
+  An image beats a URL if both are on the clipboard.
+- **No tmux or screen support.** OSC 5522 does not pass through a
+  multiplexer's byte filter by default.
 
 ## License
 
-MIT. See LICENSE.
+MIT. See [`LICENSES/MIT.txt`](LICENSES/MIT.txt). The project follows the
+[REUSE](https://reuse.software/) specification; `reuse lint` passes.
+
+Copyright © 2026 mindfulmonk and Jeffrey C. Ollie.
+
+## References cited
+
+- Anthropic. *Interactive mode*. Claude Code documentation.
+  <https://code.claude.com/docs/en/interactive-mode>. Documents Ctrl+V as the
+  paste binding, which is the keystroke `claude-wrap` synthesizes.
+- Free Software Foundation Europe. *REUSE Specification, Version 3.3*. 2024.
+  <https://reuse.software/spec-3.3/>.
+- Goyal, Kovid. *Copying all data types to the clipboard*. kitty
+  documentation. <https://sw.kovidgoyal.net/kitty/clipboard/>. The OSC 5522
+  protocol definition.
+- Jarred-Sumner. "terminal: implement kitty clipboard protocol read path (OSC
+  5522)." *ghostty* pull request 12030, 1 April 2026.
+  <https://github.com/ghostty-org/ghostty/pull/12030>. Closed unmerged.
+- MichielMAnalytics. "Support OSC 52/5522 clipboard for image paste over SSH."
+  *claude-code* issue 42712, 2 April 2026.
+  <https://github.com/anthropics/claude-code/issues/42712>. Closed as not
+  planned; the reason this project exists.
+- mindfulmonk. *claude-clipboard-ssh*. GitHub, 23 May 2026.
+  <https://github.com/mindfulmonk/claude-clipboard-ssh>. The Python original
+  this project is a port of.
+- ziglibs. *known-folders: access to well-known folders across several
+  operating systems*. GitHub.
+  <https://github.com/ziglibs/known-folders>.
+
+These are held in the Zotero collection `claude-clipboard-ssh`.

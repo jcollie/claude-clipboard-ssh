@@ -1,0 +1,19 @@
+version = 1
+SPDX-PackageName = "claude-clipboard-ssh"
+SPDX-PackageSupplier = "Jeffrey C. Ollie <jeff@ocjtech.us>"
+SPDX-PackageDownloadLocation = "https://github.com/jcollie/claude-clipboard-ssh"
+
+# Files that cannot carry a comment of their own, or that are regenerated and
+# would lose a hand-added header the next time a dependency moved.
+[[annotations]]
+path = [
+    "build.zig.zon",
+    "build.zig.zon.nix",
+    "flake.lock",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+    "© 2026 mindfulmonk <mindfulmonk@users.noreply.github.com>",
+    "© 2026 Jeffrey C. Ollie <jeff@ocjtech.us>",
+]
+SPDX-License-Identifier = "MIT"

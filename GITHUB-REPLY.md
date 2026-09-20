@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: © 2026 mindfulmonk <mindfulmonk@users.noreply.github.com>
+SPDX-License-Identifier: MIT
+-->
+
 Adding a data point from a third-party integration I built on top of this PR.
 
 I wanted to make Claude Code's image-paste work when SSH'd from ghostty into

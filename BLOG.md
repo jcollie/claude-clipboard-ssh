@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: © 2026 mindfulmonk <mindfulmonk@users.noreply.github.com>
+SPDX-License-Identifier: MIT
+-->
+
 # Image paste over SSH for Claude Code, via OSC 5522
 
 I wanted to paste screenshots into Claude Code while SSH'd into a Linux box

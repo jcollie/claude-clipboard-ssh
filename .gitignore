@@ -1,5 +1,17 @@
-__pycache__/
-*.pyc
-*.pyo
-.DS_Store
-*.log
+# SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+# SPDX-License-Identifier: MIT
+
+.zig-cache/
+zig-out/
+
+# Zig 0.16 materialises fetched dependencies here, in the project root, as
+# well as in the global cache.
+zig-pkg/
+
+# The symlink `nix build` leaves behind.
+/result
+
+# Where Zig's fuzzer puts an input that failed. Worth reading and, if it is a
+# shape rather than an accident, worth adding to the corpus -- but not worth
+# keeping as it lands.
+/fuzz-findings/
