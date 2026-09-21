@@ -26,6 +26,14 @@ let
   # `programs.claude-code.package` is nullable: someone may use that module
   # only to write settings, with claude installed by other means.
   claudeCodeProvidesPackage = claudeCode.enable && claudeCode.package != null;
+
+  # `claude` on the PATH, but it is the wrapper. A symlink is enough: the
+  # wrapper locates its stub directory from the *resolved* path of its own
+  # executable, so being reached through a link in a profile changes nothing.
+  claudeShim = pkgs.runCommandLocal "claude-as-claude-wrap" { }  ''
+    mkdir -p $out/bin
+    ln -s ${cfg.package}/bin/claude-wrap $out/bin/claude
+  '';
 in
 {
   options.programs.claude-clipboard-ssh = {
@@ -52,13 +60,51 @@ in
       '';
     };
 
+    claudePackage = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = pkgs.claude-code;
+      defaultText = lib.literalExpression "pkgs.claude-code";
+      description = ''
+        Where to find `claude` when {option}`programs.claude-code` is not
+        installing it -- which is the case when its `package` is `null`,
+        including the {option}`installAsClaude` arrangement below.
+
+        Only the path is used. The package is not added to
+        {option}`home.packages`, so this does not put `claude` back on the
+        PATH.
+      '';
+    };
+
+    installAsClaude = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Install the wrapper *as* `claude`, so the name on the PATH is the
+        wrapper and the unwrapped binary is reachable only by store path.
+
+        This replaces the shell alias, and with it the ways around the alias:
+        a script, a `command claude`, a non-interactive shell. What the
+        wrapper runs is {option}`claudePackage`, by absolute path.
+
+        Requires {option}`programs.claude-code.package` to be `null`, so that
+        module does not also put its own `claude` on the PATH. The assertion
+        will say so rather than silently overriding what you wrote.
+      '';
+    };
+
     claudeBin = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default =
-        if claudeCodeProvidesPackage then "${claudeCode.finalPackage}/bin/claude" else null;
+        if claudeCodeProvidesPackage then
+          "${claudeCode.finalPackage}/bin/claude"
+        else if cfg.claudePackage != null then
+          "${cfg.claudePackage}/bin/claude"
+        else
+          null;
       defaultText = lib.literalExpression ''
-        "''${config.programs.claude-code.finalPackage}/bin/claude"
-          when programs.claude-code is enabled with a package, else null
+        "''${config.programs.claude-code.finalPackage}/bin/claude" when
+        programs.claude-code installs one, else "''${claudePackage}/bin/claude",
+        else null
       '';
       description = ''
         The {command}`claude` executable {command}`claude-wrap` should run,
@@ -73,10 +119,12 @@ in
 
     aliasClaude = lib.mkOption {
       type = lib.types.bool;
-      default = true;
+      default = !cfg.installAsClaude;
+      defaultText = lib.literalExpression "!config.programs.claude-clipboard-ssh.installAsClaude";
       description = ''
         Alias {command}`claude` to {command}`claude-wrap` in every enabled
-        shell.
+        shell. Off by default when {option}`installAsClaude` is on, which
+        makes the alias redundant.
 
         Safe as a blanket alias: on a terminal without OSC 5522 the wrapper
         {manpage}`execve(2)`s the real {command}`claude` and adds no pty and
@@ -105,7 +153,31 @@ in
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
-      home.packages = [ cfg.package ];
+      home.packages = [ cfg.package ] ++ lib.optional cfg.installAsClaude claudeShim;
+
+      assertions = [
+        {
+          assertion = cfg.installAsClaude -> !claudeCodeProvidesPackage;
+          message = ''
+            programs.claude-clipboard-ssh.installAsClaude puts the wrapper on
+            the PATH as `claude`, but programs.claude-code is also installing
+            its own `claude` there, and which one wins is down to the order of
+            two profile directories.
+
+            Set `programs.claude-code.package = null;` -- that module will
+            still manage settings, agents and the rest, and
+            programs.claude-clipboard-ssh.claudePackage (default
+            pkgs.claude-code) is what the wrapper will run.
+          '';
+        }
+        {
+          assertion = cfg.installAsClaude -> cfg.claudePackage != null;
+          message = ''
+            programs.claude-clipboard-ssh.installAsClaude needs a `claude` to
+            run: set programs.claude-clipboard-ssh.claudePackage.
+          '';
+        }
+      ];
 
       warnings = lib.optional (cfg.claudeBin == null) ''
         programs.claude-clipboard-ssh is enabled but no `claude` executable

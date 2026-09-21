@@ -119,6 +119,21 @@
             programs.fish.enable = true;
           };
 
+          # The wrapper installed as `claude`, with the real binary kept
+          # off the PATH entirely.
+          home-manager-install-as-claude = homeConfig {
+            programs.claude-code = {
+              enable = true;
+              package = null;
+              settings.theme = "auto";
+            };
+            programs.claude-clipboard-ssh = {
+              enable = true;
+              installAsClaude = true;
+            };
+            programs.fish.enable = true;
+          };
+
           # claude-code managing settings but installing nothing:
           # `programs.claude-code.package` is nullable, and in that case
           # `finalPackage` has no value at all, so reading it unguarded is an

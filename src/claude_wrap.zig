@@ -196,10 +196,11 @@ fn findRealClaude(io: Io, arena: Allocator, env: *const std.process.Environ.Map)
     }
 
     var self_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const self_dir: ?[]const u8 = blk: {
-        const n = std.process.executableDirPath(io, &self_buf) catch break :blk null;
+    const self_exe: ?[]const u8 = blk: {
+        const n = std.process.executablePath(io, &self_buf) catch break :blk null;
         break :blk self_buf[0..n];
     };
+    const self_dir: ?[]const u8 = if (self_exe) |e| std.fs.path.dirname(e) else null;
 
     const path = env.get("PATH") orelse return null;
     var it = std.mem.splitScalar(u8, path, ':');
@@ -207,9 +208,23 @@ fn findRealClaude(io: Io, arena: Allocator, env: *const std.process.Environ.Map)
         if (dir.len == 0) continue;
         if (self_dir) |sd| if (std.mem.eql(u8, dir, sd)) continue;
         const cand = try std.fs.path.joinZ(arena, &.{ dir, "claude" });
-        if (isExecutableFile(io, cand)) return cand;
+        if (!isExecutableFile(io, cand)) continue;
+        if (isSelf(io, arena, cand, self_exe)) continue;
+        return cand;
     }
     return null;
+}
+
+/// Whether a candidate is this very program reached by another name.
+///
+/// Skipping our own *directory* is not enough once the wrapper is installed
+/// as `claude`: the copy on the PATH is then a symlink in a profile
+/// directory, pointing back at us, and exec'ing it would fork bomb. Compare
+/// what the paths resolve to rather than how they are spelled.
+fn isSelf(io: Io, arena: Allocator, candidate: [:0]const u8, self_exe: ?[]const u8) bool {
+    const mine = self_exe orelse return false;
+    const theirs = Io.Dir.cwd().realPathFileAlloc(io, candidate, arena) catch return false;
+    return std.mem.eql(u8, mine, theirs);
 }
 
 /// The newest-versioned executable *file* in a directory of version

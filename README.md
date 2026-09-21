@@ -89,9 +89,41 @@ because the wrapper `exec`s straight through on a terminal without OSC 5522.
 | --- | --- | --- |
 | `enable` | `false` | |
 | `package` | this flake's | The package to install. |
-| `claudeBin` | from `programs.claude-code` | The `claude` to run, exported as `CLAUDE_WRAP_CLAUDE_BIN`. `null` lets the wrapper search. |
-| `aliasClaude` | `true` | Alias `claude` to `claude-wrap` in bash, zsh and fish. |
+| `claudePackage` | `pkgs.claude-code` | Where to find `claude` when `programs.claude-code` installs none. Not added to `home.packages`. |
+| `claudeBin` | from the above | The `claude` to run, exported as `CLAUDE_WRAP_CLAUDE_BIN`. `null` lets the wrapper search. |
+| `installAsClaude` | `false` | Install the wrapper *as* `claude`; see below. |
+| `aliasClaude` | `!installAsClaude` | Alias `claude` to `claude-wrap` in bash, zsh and fish. |
 | `kittyClipboardControl` | `false` | Set kitty's `clipboard_control` to allow reads without a prompt. Only meaningful on the machine you sit at. |
+
+#### Keeping the unwrapped `claude` off the PATH
+
+An alias only covers interactive shells. A script, a `command claude`, a
+non-interactive shell — each reaches the real binary and skips the bridge.
+`installAsClaude` closes that off: the `claude` on your PATH becomes the
+wrapper, and the unwrapped binary is reachable only by store path.
+
+```nix
+programs.claude-code = {
+  enable = true;
+  package = null;          # manage the config, install nothing on PATH
+  settings.theme = "auto";
+};
+
+programs.claude-clipboard-ssh = {
+  enable = true;
+  installAsClaude = true;  # `claude` on PATH is the wrapper
+};
+```
+
+`programs.claude-code` still writes settings, agents, commands and MCP
+servers; it just stops adding its own `claude` alongside the wrapper's, which
+would leave the winner up to the order of two profile directories. Setting
+`package = null` is required rather than forced, so the module says what is
+wrong instead of quietly overriding what you wrote. `claudePackage` (default
+`pkgs.claude-code`) is what the wrapper then runs, by absolute path.
+
+The wrapper refuses to exec anything that resolves to itself, so being on the
+PATH under the name it searches for cannot make it recurse.
 
 If `programs.claude-code` is not installing a package — it is nullable, for
 people who use it only to write settings — the module says so as a warning
