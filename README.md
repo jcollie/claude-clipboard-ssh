@@ -156,6 +156,29 @@ alias claude=claude-wrap
 
 Paste a screenshot the way you would locally. It attaches.
 
+### Press Ctrl+V, not the terminal's paste shortcut
+
+This catches everyone, including the author of this paragraph. Claude Code's
+paste binding is **Ctrl+V**, and the terminal's own paste shortcut is a
+different thing that does not reach it — `Ctrl+Shift+V` on Linux, `Cmd+V` on
+macOS.
+
+The terminal's shortcut asks the terminal to paste, and a terminal pastes
+*text*. With only an image on the clipboard there is no text, so nothing is
+written and Claude Code never learns a paste happened. (ghostty marks its
+binding `performable`, so the keystroke does then pass through — but as
+`Ctrl+Shift+V`, which Claude Code does not read as a paste.)
+
+`Ctrl+V` is unbound in the terminal, so it reaches Claude Code, which reads
+the clipboard itself.
+
+The confusing part is that this reverses once the wrapper is bridging. With
+mode 5522 enabled the terminal turns a paste shortcut into a paste *event*
+rather than pasting text, the wrapper answers it and then sends Claude Code a
+`Ctrl+V` of its own. So over SSH with `claude-wrap` the terminal shortcut
+works, and locally without it you need `Ctrl+V` — and locally is exactly
+where you do not need this project at all.
+
 ### Environment
 
 | Variable | Effect |
@@ -248,7 +271,8 @@ Wayland session with no XWayland for `xclip` to talk to, say.
 
 - **Depends on Ctrl+V being Claude Code's paste binding**, which is
   [documented behavior](https://code.claude.com/docs/en/interactive-mode).
-  If that changes, the wrapper needs the keystroke updated.
+  If that changes, the wrapper needs the keystroke updated. See the note
+  above on why the terminal's own paste shortcut is not the same thing.
 - **No image write.** `xclip -i` and `wl-copy` fall back to OSC 52, which is
   text-only. Claude Code does not appear to need image writes.
 - **One MIME type per paste in ghostty**, because the password is single-use.
