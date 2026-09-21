@@ -32,7 +32,8 @@ pub fn main(init: std.process.Init) !u8 {
     var log = ccssh.Logger.init(io, gpa, env, "xclip-shim.log");
     defer log.deinit();
 
-    const args = ccssh.parseXclipArgs(try init.minimal.args.toSlice(arena));
+    const argv = try init.minimal.args.toSlice(arena);
+    const args = ccssh.parseXclipArgs(argv);
 
     var out_buf: [64 * 1024]u8 = undefined;
     var stdout = Io.File.stdout().writerStreaming(io, &out_buf);
@@ -44,6 +45,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (args.action == .in) {
+        try ccssh.execRealTool(io, arena, env, "xclip", argv);
         const data = try ccssh.readAllStdin(io, gpa);
         defer gpa.free(data);
         log.print("clipboard write: {d} bytes via OSC 52", .{data.len});
@@ -52,7 +54,11 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     var cache = (try ccssh.Cache.open(io, gpa, env)) orelse {
-        log.print("cache stale or missing", .{});
+        // Nothing cached: hand over to the real xclip if this machine has
+        // one, rather than confidently reporting an empty clipboard and
+        // steering Claude Code away from a clipboard that works.
+        log.print("cache stale or missing; deferring to the real xclip", .{});
+        try ccssh.execRealTool(io, arena, env, "xclip", argv);
         return 1;
     };
     defer cache.close(io);

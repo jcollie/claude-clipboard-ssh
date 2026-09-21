@@ -126,6 +126,18 @@ pub const Cache = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Drop the freshness marker, so the stubs treat the cache as empty and
+    /// hand over to the real clipboard tool instead. Used when an exchange
+    /// fails: without it, a paste that went wrong within the TTL would be
+    /// answered with the *previous* paste's contents.
+    pub fn invalidate(io: Io, gpa: Allocator, env: *const std.process.Environ.Map) void {
+        const dirpath = cacheDirPath(io, gpa, env) catch return;
+        defer gpa.free(dirpath);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const ts = std.fmt.bufPrint(&buf, "{s}/.ts", .{dirpath}) catch return;
+        Io.Dir.cwd().deleteFile(io, ts) catch {};
+    }
+
     /// The bytes held for one MIME type, or null. Matched on the base type,
     /// so a request for `text/plain` finds what a
     /// `text/plain;charset=utf-8` paste stored.
@@ -135,6 +147,56 @@ pub const Cache = struct {
         return c.dir.readFileAlloc(io, name, gpa, .unlimited) catch null;
     }
 };
+
+/// Hand over to the real clipboard tool of this name, if there is one.
+///
+/// The stubs shadow `xclip`, `wl-paste` and `wl-copy` for the process tree
+/// `claude` runs in, and a stub that answers "nothing" is worse than no stub
+/// at all: Claude Code probes whichever of those tools exists and takes a
+/// different path depending on the answer, so a confident empty reply steers
+/// it away from a clipboard that would have worked. That matters most when
+/// the wrapper is bridging a *local* session, where a real clipboard is
+/// sitting right there.
+///
+/// So when the cache has nothing to say, exec the real tool with the same
+/// arguments and let it answer. Exec rather than reimplement: the real tool's
+/// flags and exit statuses are then exactly right, because they are its own.
+///
+/// Returns only when there is no real tool to hand over to.
+pub fn execRealTool(
+    io: Io,
+    arena: Allocator,
+    env: *const std.process.Environ.Map,
+    name: []const u8,
+    argv: []const []const u8,
+) !void {
+    var self_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const self_dir: ?[]const u8 = blk: {
+        const n = std.process.executableDirPath(io, &self_buf) catch break :blk null;
+        break :blk self_buf[0..n];
+    };
+
+    const path = env.get("PATH") orelse return;
+    var it = std.mem.splitScalar(u8, path, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        // Skipping our own directory is what stops this being a fork bomb.
+        if (self_dir) |sd| if (std.mem.eql(u8, dir, sd)) continue;
+
+        const candidate = try std.fs.path.joinZ(arena, &.{ dir, name });
+        const stat = Io.Dir.cwd().statFile(io, candidate, .{}) catch continue;
+        if (stat.kind != .file) continue;
+        if (@TypeOf(stat.permissions).has_executable_bit and
+            stat.permissions.toMode() & 0o111 == 0) continue;
+
+        const real_argv = try arena.alloc([]const u8, argv.len);
+        real_argv[0] = candidate;
+        for (argv[1..], 1..) |a, i| real_argv[i] = a;
+        // `replace` returns only its error set, and only on failure.
+        std.process.replace(io, .{ .argv = real_argv, .environ_map = env }) catch {};
+        return; // exec failed; nothing else to try
+    }
+}
 
 // ------------------------------------------------------------- OSC scanning
 
@@ -269,17 +331,6 @@ pub fn collectAdvertisedMimes(
 
     var it = mimeListIterator(list);
     while (it.next()) |one| try out.append(gpa, try gpa.dupe(u8, one));
-}
-
-/// Whether this session came in over SSH, which is the only situation the
-/// wrapper helps in. Locally the terminal and Claude Code manage the
-/// clipboard between themselves, and interposing a pty then only adds ways
-/// for a paste to go wrong.
-pub fn isOverSsh(env: *const std.process.Environ.Map) bool {
-    for ([_][]const u8{ "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY" }) |name| {
-        if (env.get(name)) |v| if (v.len > 0) return true;
-    }
-    return false;
 }
 
 // ------------------------------------------------------------ MIME choice
@@ -739,15 +790,6 @@ test "collectAdvertisedMimes also accepts one type per packet" {
     try collectAdvertisedMimes(gpa, parse5522(one).?, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
     try std.testing.expectEqualStrings("image/png", out.items[0]);
-}
-
-test "isOverSsh" {
-    const gpa = std.testing.allocator;
-    var env: std.process.Environ.Map = .init(gpa);
-    defer env.deinit();
-    try std.testing.expect(!isOverSsh(&env));
-    try env.put("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22");
-    try std.testing.expect(isOverSsh(&env));
 }
 
 test "compareVersionNames orders numerically, not lexicographically" {

@@ -60,6 +60,10 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
 
+    // A real wl-copy reaches a clipboard something is actually reading, so
+    // prefer it; OSC 52 is the remote-only fallback.
+    try ccssh.execRealTool(io, arena, env, "wl-copy", argv);
+
     const selection: []const u8 = if (primary) "primary" else "clipboard";
 
     if (clear) {

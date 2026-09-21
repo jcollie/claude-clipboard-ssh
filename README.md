@@ -63,7 +63,7 @@ the stub is not on your `PATH`, only on the one `claude` is given.
 
 The flake exposes `homeModules.default`, which installs the two programs and
 wires them to `programs.claude-code`. Enable it in the home configuration of
-the **remote** machine — the one you ssh into and run `claude` on.
+any machine you run `claude` on, whether that is over SSH or local.
 
 ```nix
 {
@@ -156,28 +156,27 @@ alias claude=claude-wrap
 
 Paste a screenshot the way you would locally. It attaches.
 
-### Press Ctrl+V, not the terminal's paste shortcut
+### Which key pastes
 
-This catches everyone, including the author of this paragraph. Claude Code's
-paste binding is **Ctrl+V**, and the terminal's own paste shortcut is a
-different thing that does not reach it — `Ctrl+Shift+V` on Linux, `Cmd+V` on
-macOS.
+With `claude-wrap` running, both work: the terminal's own paste shortcut
+(`Ctrl+Shift+V` on Linux, `Cmd+V` on macOS) and Claude Code's `Ctrl+V`.
+Making those agree everywhere is most of the point of the wrapper.
 
-The terminal's shortcut asks the terminal to paste, and a terminal pastes
-*text*. With only an image on the clipboard there is no text, so nothing is
-written and Claude Code never learns a paste happened. (ghostty marks its
-binding `performable`, so the keystroke does then pass through — but as
-`Ctrl+Shift+V`, which Claude Code does not read as a paste.)
+Without it, only `Ctrl+V` does. The reason is worth knowing, because it is
+what a broken setup looks like:
 
-`Ctrl+V` is unbound in the terminal, so it reaches Claude Code, which reads
-the clipboard itself.
+- The terminal's shortcut asks the *terminal* to paste, and a terminal pastes
+  **text**. With only an image on the clipboard there is no text, so nothing
+  is written and Claude Code never learns a paste happened. (ghostty marks
+  its binding `performable`, so the keystroke does then pass through — but as
+  `Ctrl+Shift+V`, which Claude Code does not read as a paste.)
+- `Ctrl+V` is unbound in the terminal, so it reaches Claude Code, which reads
+  the clipboard itself.
 
-The confusing part is that this reverses once the wrapper is bridging. With
-mode 5522 enabled the terminal turns a paste shortcut into a paste *event*
-rather than pasting text, the wrapper answers it and then sends Claude Code a
-`Ctrl+V` of its own. So over SSH with `claude-wrap` the terminal shortcut
-works, and locally without it you need `Ctrl+V` — and locally is exactly
-where you do not need this project at all.
+With the wrapper, mode 5522 changes the first case: the terminal turns its
+paste shortcut into a paste *event* instead of pasting text, the wrapper
+answers it, and then sends Claude Code a `Ctrl+V` of its own. So the shortcut
+you already have muscle memory for is the one that works.
 
 ### Environment
 
@@ -185,7 +184,7 @@ where you do not need this project at all.
 | --- | --- |
 | `CLAUDE_WRAP_CLAUDE_BIN` | Use this `claude` instead of searching for one. |
 | `CLAUDE_CLIPBOARD_SHIM_DIR` | Use this directory for the `xclip` stub. |
-| `CLAUDE_WRAP_FORCE` | Engage even when not over SSH. |
+| `CLAUDE_WRAP_DISABLE` | Do not bridge; `exec` `claude` unchanged. |
 | `XDG_RUNTIME_DIR` | Where the clipboard cache lives (resolved via known-folders). |
 | `XDG_STATE_HOME` | Where `claude-wrap.log` and `xclip-shim.log` are appended. |
 
@@ -258,14 +257,18 @@ nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
   follow-up read is granted without a prompt.
 - Any other terminal: falls back to `exec`ing `claude`.
 
-**The wrapper only engages over SSH.** Enabling mode 5522 makes the terminal
-stop sending pasted text and send a paste *event* instead, so from that point
-every paste depends on the wrapper handling the exchange — there is no text
-left to fall back to. Locally the terminal and Claude Code already manage the
-clipboard between themselves, so that risk buys nothing, and the wrapper
-`exec`s straight through. Set `CLAUDE_WRAP_FORCE=1` to engage anyway, which
-is worth doing if the local clipboard does not work for you either — a
-Wayland session with no XWayland for `xclip` to talk to, say.
+**The wrapper engages whenever the terminal speaks OSC 5522**, local or
+remote, because the alternative is the same keystroke behaving differently
+depending on where `claude` happens to be running. `CLAUDE_WRAP_DISABLE=1`
+turns it off.
+
+What makes that safe is that every failure path still lands the paste. Mode
+5522 stops the terminal sending pasted text, so a bridge that gives up
+silently loses it. Instead the wrapper invalidates its cache and sends Claude
+Code a `Ctrl+V`, which makes Claude Code run its own clipboard read — and the
+stubs hand over to the real `xclip` or `wl-paste` when the cache has nothing
+to say. So on a local session a paste the bridge could not handle is still
+served, by the clipboard that was there all along.
 
 ## Known limitations
 

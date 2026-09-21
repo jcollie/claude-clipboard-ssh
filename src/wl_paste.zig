@@ -75,7 +75,8 @@ pub fn main(init: std.process.Init) !u8 {
     var log = ccssh.Logger.init(io, gpa, env, "xclip-shim.log");
     defer log.deinit();
 
-    const args = parseArgs(try init.minimal.args.toSlice(arena));
+    const argv = try init.minimal.args.toSlice(arena);
+    const args = parseArgs(argv);
 
     var out_buf: [64 * 1024]u8 = undefined;
     var stdout = Io.File.stdout().writerStreaming(io, &out_buf);
@@ -89,7 +90,8 @@ pub fn main(init: std.process.Init) !u8 {
     // Real wl-paste exits 1 when nothing suitable has been copied, which is
     // what the `||` chains in Claude Code are testing for.
     var cache = (try ccssh.Cache.open(io, gpa, env)) orelse {
-        log.print("wl-paste: cache stale or missing", .{});
+        log.print("wl-paste: cache stale or missing; deferring to the real one", .{});
+        try ccssh.execRealTool(io, arena, env, "wl-paste", argv);
         return 1;
     };
     defer cache.close(io);

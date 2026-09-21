@@ -30,11 +30,14 @@ in
 {
   options.programs.claude-clipboard-ssh = {
     enable = lib.mkEnableOption ''
-      claude-clipboard-ssh, which lets Claude Code paste images over SSH by
-      speaking OSC 5522 to kitty or ghostty on the machine you are sitting at.
+      claude-clipboard-ssh, which lets Claude Code paste images by speaking
+      OSC 5522 to kitty or ghostty, whether `claude` is running locally or
+      over SSH.
 
-      Enable this in the home configuration of the **remote** machine -- the
-      one you ssh into and run `claude` on
+      Over SSH it is what makes image paste possible at all, since the remote
+      box has no display to read a clipboard from. Locally it is what makes
+      the terminal's own paste shortcut work -- Ctrl+Shift+V, or Cmd+V on
+      macOS -- which otherwise does nothing for an image
     '';
 
     package = lib.mkOption {

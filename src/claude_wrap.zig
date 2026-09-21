@@ -76,32 +76,19 @@ pub fn main(init: std.process.Init) !u8 {
     };
     log.print("real claude: {s}", .{real});
 
-    // Get out of the way entirely unless there is something to gain.
+    // Engage whenever the terminal speaks OSC 5522, local session or not.
     //
-    // Two conditions, and the SSH one is not an optimisation. Enabling mode
-    // 5522 makes the terminal stop sending pasted text and send a paste
-    // event instead, so from that moment every paste depends on this
-    // wrapper handling the exchange correctly -- there is no longer any
-    // text for it to fall back to. On a local session the terminal and
-    // Claude Code already manage the clipboard between themselves, so that
-    // is a risk taken for no benefit.
-    const forced = if (env.get("CLAUDE_WRAP_FORCE")) |v|
-        v.len > 0 and !std.mem.eql(u8, v, "0")
-    else
-        false;
-    const supported = ccssh.isSupportedTerminal(env);
-    const over_ssh = ccssh.isOverSsh(env);
-
-    if (!supported or !(over_ssh or forced)) {
-        if (!supported) {
-            log.print("terminal has no OSC 5522; exec'ing claude directly", .{});
-        } else {
-            log.print(
-                "local session, nothing to bridge; exec'ing claude directly " ++
-                    "(set CLAUDE_WRAP_FORCE=1 to override)",
-                .{},
-            );
-        }
+    // Consistency is the point: with the wrapper active the terminal's paste
+    // shortcut works, and without it that shortcut silently does nothing for
+    // an image, so a wrapper that engaged only over SSH would mean the same
+    // keystroke behaving differently depending on where `claude` happened to
+    // be running.
+    //
+    // What makes this safe is the fallback below rather than the gate that
+    // used to be here: mode 5522 stops the terminal sending pasted text, so
+    // every failure path has to end with the paste still landing.
+    if (!ccssh.isSupportedTerminal(env) or disabled(env)) {
+        log.print("not bridging; exec'ing claude directly", .{});
         const slice_argv = try arena.alloc([]const u8, argv_vec.len);
         slice_argv[0] = real;
         for (argv_vec[1..], 1..) |a, i| slice_argv[i] = std.mem.span(a);
@@ -164,6 +151,12 @@ pub fn main(init: std.process.Init) !u8 {
     sys.close(child.master);
 
     return reap(child.pid);
+}
+
+/// An escape hatch, for when the bridge is the thing in the way.
+fn disabled(env: *const std.process.Environ.Map) bool {
+    const v = env.get("CLAUDE_WRAP_DISABLE") orelse return false;
+    return v.len > 0 and !std.mem.eql(u8, v, "0");
 }
 
 fn fail(io: Io, msg: []const u8) !void {
@@ -298,9 +291,9 @@ fn proxy(
             const now = Io.Clock.awake.now(io).nanoseconds;
             if (now >= paste.deadline) {
                 // Tell claude something rather than leaving it waiting.
-                log.print("data response timed out; abandoning paste", .{});
+                log.print("data response timed out", .{});
                 paste.reset();
-                ccssh.writeAllFd(master, "\x1b[200~\x1b[201~") catch {};
+                giveUp(io, gpa, env, log, master);
                 continue;
             }
             timeout_ms = @intCast(@divTrunc(paste.deadline - now, std.time.ns_per_ms) + 1);
@@ -433,13 +426,9 @@ const Paste = struct {
                 if (!std.mem.eql(u8, status, "DONE")) return;
 
                 const idx = ccssh.chooseMime(p.mimes.items) orelse {
-                    // Nothing to send. Deliberately *not* an empty
-                    // bracketed paste: mode 5522 has already replaced the
-                    // real paste with this event, so writing an empty one
-                    // is how a paste gets silently thrown away rather than
-                    // merely unhandled.
                     log.print("no usable MIME type among {d} offered", .{p.mimes.items.len});
                     p.reset();
+                    giveUp(io, gpa, env, log, master);
                     return;
                 };
                 const chosen = p.mimes.items[idx];
@@ -465,8 +454,8 @@ const Paste = struct {
                     const mime = p.mime orelse "";
                     const raw = ccssh.b64DecodeAlloc(gpa, p.data.items) catch |e| {
                         log.print("undecodable clipboard payload: {t}", .{e});
-                        ccssh.writeAllFd(master, "\x1b[200~\x1b[201~") catch {};
                         p.reset();
+                        giveUp(io, gpa, env, log, master);
                         return;
                     };
                     defer gpa.free(raw);
@@ -492,14 +481,38 @@ const Paste = struct {
                     return;
                 }
 
-                // EPERM, ENOSYS, EBUSY, EIO, EINVAL -- the paste is not happening.
+                // EPERM, ENOSYS, EBUSY, EIO, EINVAL -- the terminal will not
+                // serve it, so fall back to reading the clipboard locally.
                 log.print("terminal refused the read: {s}", .{status});
-                ccssh.writeAllFd(master, "\x1b[200~\x1b[201~") catch {};
                 p.reset();
+                giveUp(io, gpa, env, log, master);
             },
         }
     }
 };
+
+/// Abandon the exchange and let Claude Code read the clipboard itself.
+///
+/// Mode 5522 has already replaced the pasted text with the event, so doing
+/// nothing here loses the paste outright. Sending Ctrl+V instead makes Claude
+/// Code run its own clipboard read, which reaches the stubs -- and those hand
+/// over to the real `xclip` or `wl-paste` when the cache has nothing, so a
+/// local paste still lands.
+///
+/// The cache is invalidated first. Without that, a failure inside the
+/// sixty-second window would be answered with the *previous* paste's
+/// contents, which is worse than failing.
+fn giveUp(
+    io: Io,
+    gpa: Allocator,
+    env: *const std.process.Environ.Map,
+    log: *const ccssh.Logger,
+    master: posix.fd_t,
+) void {
+    ccssh.Cache.invalidate(io, gpa, env);
+    log.print("handing the paste back to claude's own clipboard read", .{});
+    ccssh.writeAllFd(master, "\x16") catch {};
+}
 
 /// Ask the terminal for one MIME type.
 ///
