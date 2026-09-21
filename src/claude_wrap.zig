@@ -76,17 +76,6 @@ pub fn main(init: std.process.Init) !u8 {
     };
     log.print("real claude: {s}", .{real});
 
-    // The stub has to be on the PATH `claude` searches, and ahead of any
-    // real xclip. Prepending it here rather than installing it into a bin
-    // directory is what keeps the shadowing scoped to this process tree.
-    if (try ccssh.findShimDir(io, arena, env)) |shim_dir| {
-        const old_path = env.get("PATH") orelse "";
-        try env.put("PATH", try std.fmt.allocPrint(arena, "{s}:{s}", .{ shim_dir, old_path }));
-        log.print("shim dir: {s}", .{shim_dir});
-    } else {
-        log.print("no shim dir found; image paste will not work", .{});
-    }
-
     // Get out of the way entirely unless there is something to gain.
     //
     // Two conditions, and the SSH one is not an optimisation. Enabling mode
@@ -121,6 +110,23 @@ pub fn main(init: std.process.Init) !u8 {
         return 127;
     }
     log.print("terminal: ghostty={} kitty={}", .{ ccssh.isGhostty(env), ccssh.isKitty(env) });
+
+    // Only now, having committed to bridging, does the stub go on the PATH
+    // `claude` searches.
+    //
+    // Doing this before the decision above shadowed the real clipboard on
+    // sessions where the wrapper then stepped aside, and the stub is no
+    // substitute when nothing is filling its cache. Worse than useless,
+    // in fact: Claude Code probes `xclip -t TARGETS` *or* `wl-paste -l`
+    // depending on what exists, so an `xclip` that answers nothing diverts
+    // it away from a wl-paste path that would have worked.
+    if (try ccssh.findShimDir(io, arena, env)) |shim_dir| {
+        const old_path = env.get("PATH") orelse "";
+        try env.put("PATH", try std.fmt.allocPrint(arena, "{s}:{s}", .{ shim_dir, old_path }));
+        log.print("shim dir: {s}", .{shim_dir});
+    } else {
+        log.print("no shim dir found; image paste will not work", .{});
+    }
 
     // argv[0] becomes the real path; everything the user typed passes through.
     const child_argv = try arena.allocSentinel(?[*:0]const u8, argv_vec.len, null);

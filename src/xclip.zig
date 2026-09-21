@@ -4,10 +4,10 @@
 
 //! A drop-in `xclip` that serves from the cache `claude-wrap` writes.
 //!
-//! Claude Code reads the clipboard on Linux by shelling out to `xclip`:
-//! first `-t TARGETS -o` to discover what is on offer, then `-t <mime> -o`
-//! for the bytes. Over SSH the real xclip has no display to ask. This
-//! program answers both calls out of `$XDG_RUNTIME_DIR/xclip-shim-<uid>/`,
+//! Claude Code reads the clipboard on Linux by shelling out: first
+//! `xclip -selection clipboard -t TARGETS -o` to discover what is on offer,
+//! then `-t <mime> -o` for the bytes. Over SSH the real xclip has no display
+//! to ask. This answers both out of `$XDG_RUNTIME_DIR/xclip-shim-<uid>/`,
 //! which the wrapper has just filled by doing the OSC 5522 exchange with the
 //! terminal on the user's own machine.
 //!
@@ -21,7 +21,6 @@
 const std = @import("std");
 const ccssh = @import("ccssh");
 
-const posix = std.posix;
 const Io = std.Io;
 
 pub fn main(init: std.process.Init) !u8 {
@@ -33,8 +32,7 @@ pub fn main(init: std.process.Init) !u8 {
     var log = ccssh.Logger.init(io, gpa, env, "xclip-shim.log");
     defer log.deinit();
 
-    const argv = try init.minimal.args.toSlice(arena);
-    const args = ccssh.parseXclipArgs(argv);
+    const args = ccssh.parseXclipArgs(try init.minimal.args.toSlice(arena));
 
     var out_buf: [64 * 1024]u8 = undefined;
     var stdout = Io.File.stdout().writerStreaming(io, &out_buf);
@@ -46,42 +44,42 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (args.action == .in) {
-        var in_buf: [64 * 1024]u8 = undefined;
-        var stdin = Io.File.stdin().readerStreaming(io, &in_buf);
-        const data = try stdin.interface.allocRemaining(gpa, .unlimited);
+        const data = try ccssh.readAllStdin(io, gpa);
         defer gpa.free(data);
         log.print("clipboard write: {d} bytes via OSC 52", .{data.len});
-        const fd = ccssh.sys.open("/dev/tty", .{ .ACCMODE = .WRONLY, .NOCTTY = true }, 0) catch return 0;
-        defer ccssh.sys.close(fd);
-        try ccssh.writeOsc52(gpa, fd, data, args.selection);
+        try ccssh.writeOsc52ToTty(gpa, data, args.selection);
         return 0;
     }
 
-    const dirpath = try ccssh.cacheDirPath(io, gpa, env);
-    defer gpa.free(dirpath);
-
-    if (!cacheFresh(io, dirpath)) {
-        log.print("cache stale or missing at {s}", .{dirpath});
-        return 1;
-    }
-
-    var dir = Io.Dir.cwd().openDir(io, dirpath, .{ .iterate = true }) catch {
-        log.print("cannot open cache dir {s}", .{dirpath});
+    var cache = (try ccssh.Cache.open(io, gpa, env)) orelse {
+        log.print("cache stale or missing", .{});
         return 1;
     };
-    defer dir.close(io);
+    defer cache.close(io);
 
     if (std.mem.eql(u8, args.target, "TARGETS")) {
-        try listTargets(io, gpa, &dir, &stdout.interface, &log);
+        const mimes = try cache.listMimes(io, gpa);
+        defer {
+            for (mimes) |m| gpa.free(m);
+            gpa.free(mimes);
+        }
+        // The shape real xclip uses: the pseudo-targets first, then the X11
+        // text aliases if there is any text, then the types themselves.
+        try stdout.interface.writeAll("TARGETS\nTIMESTAMP\nMULTIPLE\n");
+        for (mimes) |m| {
+            if (std.mem.eql(u8, m, "text/plain")) {
+                try stdout.interface.writeAll("UTF8_STRING\nSTRING\nTEXT\n");
+                break;
+            }
+        }
+        for (mimes) |m| try stdout.interface.print("{s}\n", .{m});
         try stdout.interface.flush();
+        log.print("TARGETS: {d} entries", .{mimes.len});
         return 0;
     }
 
     const mime = ccssh.targetToMime(args.target);
-    const name = try ccssh.mimeToFileName(gpa, mime);
-    defer gpa.free(name);
-
-    const data = dir.readFileAlloc(io, name, gpa, .unlimited) catch {
+    const data = (try cache.read(io, gpa, mime)) orelse {
         log.print("no cache entry for {s}", .{mime});
         return 1;
     };
@@ -91,53 +89,6 @@ pub fn main(init: std.process.Init) !u8 {
     try stdout.interface.writeAll(data);
     try stdout.interface.flush();
     return 0;
-}
-
-/// Answer `-t TARGETS -o` with what the cache actually holds, in the shape
-/// real xclip uses: the three pseudo-targets first, then the X11 text
-/// aliases if there is any text, then the MIME types themselves.
-fn listTargets(
-    io: Io,
-    gpa: std.mem.Allocator,
-    dir: *Io.Dir,
-    out: *Io.Writer,
-    log: *const ccssh.Logger,
-) !void {
-    var mimes: std.ArrayList([]u8) = .empty;
-    defer {
-        for (mimes.items) |m| gpa.free(m);
-        mimes.deinit(gpa);
-    }
-
-    var it = dir.iterate();
-    while (try it.next(io)) |e| {
-        // `.ts` is the freshness marker, not a payload.
-        if (e.name.len == 0 or e.name[0] == '.') continue;
-        const st = dir.statFile(io, e.name, .{}) catch continue;
-        if (st.size == 0) continue;
-        try mimes.append(gpa, try ccssh.fileNameToMime(gpa, e.name));
-    }
-
-    try out.writeAll("TARGETS\nTIMESTAMP\nMULTIPLE\n");
-    for (mimes.items) |m| {
-        if (std.mem.eql(u8, m, "text/plain")) {
-            try out.writeAll("UTF8_STRING\nSTRING\nTEXT\n");
-            break;
-        }
-    }
-    for (mimes.items) |m| try out.print("{s}\n", .{m});
-
-    log.print("TARGETS: {d} entries", .{mimes.items.len});
-}
-
-/// The wrapper touches `.ts` after every write; its mtime is the whole of
-/// the freshness signal. Wall-clock, because that is what a file mtime is.
-fn cacheFresh(io: Io, dirpath: []const u8) bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ts = std.fmt.bufPrint(&buf, "{s}/.ts", .{dirpath}) catch return false;
-    const st = Io.Dir.cwd().statFile(io, ts, .{}) catch return false;
-    const now = Io.Clock.real.now(io).nanoseconds;
-    return now - st.mtime.nanoseconds < ccssh.cache_ttl_ns;
 }
 
 test "reference every declaration so lazy analysis cannot hide a broken one" {

@@ -91,9 +91,22 @@ pub fn build(b: *std.Build) void {
 
     const programs = [_]Program{
         .{ .name = "claude-wrap", .root = "src/claude_wrap.zig" },
+        // All three clipboard tools Claude Code may reach for, because
+        // shadowing only one of them lets it take a path that bypasses the
+        // cache and reports an empty clipboard.
         .{
             .name = "xclip",
             .root = "src/xclip.zig",
+            .dest_dir = .{ .override = .{ .custom = shim_subdir } },
+        },
+        .{
+            .name = "wl-paste",
+            .root = "src/wl_paste.zig",
+            .dest_dir = .{ .override = .{ .custom = shim_subdir } },
+        },
+        .{
+            .name = "wl-copy",
+            .root = "src/wl_copy.zig",
             .dest_dir = .{ .override = .{ .custom = shim_subdir } },
         },
         // The debug tools. Note they must never land in the libexec

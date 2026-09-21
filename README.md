@@ -33,9 +33,15 @@ Two programs work around it:
   ghostty and kitty send, fetches the clipboard data, writes it to a cache
   directory, and then sends Ctrl+V to the inner `claude` so its normal
   clipboard flow fires.
-- **`xclip`** — a drop-in stub that serves from that cache. `claude-wrap`
-  puts its directory at the front of the `PATH` it hands the child, so the
-  stub shadows the real `xclip` for Claude Code and for nothing else.
+- **`xclip`, `wl-paste`, `wl-copy`** — drop-in stubs that serve from that
+  cache. `claude-wrap` puts their directory at the front of the `PATH` it
+  hands the child, so they shadow the real tools for Claude Code and for
+  nothing else — and only when the wrapper is actually bridging.
+
+  All three, not just `xclip`: Claude Code probes with either
+  `xclip -t TARGETS -o` or `wl-paste -l` depending on what it finds, and its
+  image fetch is a chain across both. Shadowing one lets it take a path that
+  bypasses the cache and concludes the clipboard is empty.
 
 Together they let you paste screenshots into a `claude` session running over
 SSH.
@@ -108,11 +114,11 @@ one directory — `claude-wrap` falls back to looking beside itself:
 ```sh
 mkdir -p ~/.local/bin
 cp zig-out/bin/claude-wrap ~/.local/bin/
-cp zig-out/libexec/claude-clipboard-ssh/xclip ~/.local/bin/
+cp zig-out/libexec/claude-clipboard-ssh/* ~/.local/bin/
 ```
 
-That layout does put a fake `xclip` on your own `PATH`, which is why the Nix
-package does not use it.
+That layout does put fake clipboard tools on your own `PATH`, which is why
+the Nix package does not use it.
 
 ### On a macOS remote
 
@@ -169,7 +175,7 @@ Paste a screenshot the way you would locally. It attaches.
                           $XDG_RUNTIME_DIR/xclip-shim-<uid>/
                                    ^
                                    | reads bytes
-                               [xclip stub]  <-- claude shells out
+                    [xclip / wl-paste stubs]  <-- claude shells out
 ```
 
 ghostty's OSC 5522 is per-paste authenticated: when the user pastes, the
@@ -243,8 +249,8 @@ Wayland session with no XWayland for `xclip` to talk to, say.
 - **Depends on Ctrl+V being Claude Code's paste binding**, which is
   [documented behavior](https://code.claude.com/docs/en/interactive-mode).
   If that changes, the wrapper needs the keystroke updated.
-- **No image write.** `xclip -i` falls back to OSC 52, which is text-only.
-  Claude Code does not appear to need it.
+- **No image write.** `xclip -i` and `wl-copy` fall back to OSC 52, which is
+  text-only. Claude Code does not appear to need image writes.
 - **One MIME type per paste in ghostty**, because the password is single-use.
   An image beats a URL if both are on the clipboard.
 - **No tmux or screen support.** OSC 5522 does not pass through a

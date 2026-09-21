@@ -75,6 +75,67 @@ pub fn fileNameToMime(gpa: Allocator, name: []const u8) Allocator.Error![]u8 {
     return out;
 }
 
+/// The clipboard cache, as the stubs see it.
+///
+/// Opening one succeeds only if the cache is fresh, so a caller that gets a
+/// `Cache` can serve from it and a caller that gets `null` knows to report an
+/// empty clipboard rather than a stale one.
+pub const Cache = struct {
+    dir: Io.Dir,
+
+    /// Null when the cache is missing, unreadable or older than the TTL.
+    pub fn open(io: Io, gpa: Allocator, env: *const std.process.Environ.Map) !?Cache {
+        const dirpath = try cacheDirPath(io, gpa, env);
+        defer gpa.free(dirpath);
+        if (!isFresh(io, dirpath)) return null;
+        const dir = Io.Dir.cwd().openDir(io, dirpath, .{ .iterate = true }) catch return null;
+        return .{ .dir = dir };
+    }
+
+    pub fn close(c: *Cache, io: Io) void {
+        c.dir.close(io);
+        c.* = undefined;
+    }
+
+    /// The wrapper touches `.ts` after every write, and its mtime is the
+    /// whole of the freshness signal. Wall clock, because that is what a
+    /// file mtime is.
+    fn isFresh(io: Io, dirpath: []const u8) bool {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const ts = std.fmt.bufPrint(&buf, "{s}/.ts", .{dirpath}) catch return false;
+        const marker = Io.Dir.cwd().statFile(io, ts, .{}) catch return false;
+        return Io.Clock.real.now(io).nanoseconds - marker.mtime.nanoseconds < cache_ttl_ns;
+    }
+
+    /// The MIME types held, newest paste only. Caller owns the list and its
+    /// strings.
+    pub fn listMimes(c: Cache, io: Io, gpa: Allocator) ![][]u8 {
+        var out: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (out.items) |m| gpa.free(m);
+            out.deinit(gpa);
+        }
+        var it = c.dir.iterate();
+        while (try it.next(io)) |e| {
+            // `.ts` is the freshness marker, not a payload.
+            if (e.name.len == 0 or e.name[0] == '.') continue;
+            const entry = c.dir.statFile(io, e.name, .{}) catch continue;
+            if (entry.size == 0) continue;
+            try out.append(gpa, try fileNameToMime(gpa, e.name));
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// The bytes held for one MIME type, or null. Matched on the base type,
+    /// so a request for `text/plain` finds what a
+    /// `text/plain;charset=utf-8` paste stored.
+    pub fn read(c: Cache, io: Io, gpa: Allocator, mime: []const u8) !?[]u8 {
+        const name = try mimeToFileName(gpa, baseMime(mime));
+        defer gpa.free(name);
+        return c.dir.readFileAlloc(io, name, gpa, .unlimited) catch null;
+    }
+};
+
 // ------------------------------------------------------------- OSC scanning
 
 pub const osc_introducer = "\x1b]";
@@ -434,6 +495,22 @@ pub fn compareVersionNames(a: []const u8, b: []const u8) std.math.Order {
 /// nonblocking flag we do not control on an inherited descriptor, so the
 /// proxy talks to its descriptors through the syscall directly.
 pub const writeAllFd = sys.writeAll;
+
+/// Read stdin to end. Caller owns the returned memory.
+pub fn readAllStdin(io: Io, gpa: Allocator) ![]u8 {
+    var buf: [64 * 1024]u8 = undefined;
+    var stdin = Io.File.stdin().readerStreaming(io, &buf);
+    return stdin.interface.allocRemaining(gpa, .unlimited);
+}
+
+/// Set the clipboard by writing OSC 52 at the controlling terminal. Silently
+/// does nothing without one, which is the same as the write not landing --
+/// there is no channel to report it on.
+pub fn writeOsc52ToTty(gpa: Allocator, data: []const u8, selection: []const u8) !void {
+    const fd = sys.open("/dev/tty", .{ .ACCMODE = .WRONLY, .NOCTTY = true }, 0) catch return;
+    defer sys.close(fd);
+    try writeOsc52(gpa, fd, data, selection);
+}
 
 /// Write an OSC 52 clipboard-set sequence to a descriptor.
 pub fn writeOsc52(gpa: Allocator, fd: posix.fd_t, data: []const u8, selection: []const u8) !void {
