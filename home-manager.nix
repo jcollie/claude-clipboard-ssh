@@ -27,12 +27,22 @@ let
   # only to write settings, with claude installed by other means.
   claudeCodeProvidesPackage = claudeCode.enable && claudeCode.package != null;
 
-  # `claude` on the PATH, but it is the wrapper. A symlink is enough: the
-  # wrapper locates its stub directory from the *resolved* path of its own
-  # executable, so being reached through a link in a profile changes nothing.
-  claudeShim = pkgs.runCommandLocal "claude-as-claude-wrap" { }  ''
-    mkdir -p $out/bin
-    ln -s ${cfg.package}/bin/claude-wrap $out/bin/claude
+  # `claude` on the PATH, but it is the wrapper, carrying the path of the
+  # real binary with it.
+  #
+  # Not a bare symlink and not a reliance on home.sessionVariables: with
+  # `installAsClaude` the real `claude` is deliberately off the PATH, so the
+  # environment variable is the wrapper's only route to it, and anything that
+  # does not source hm-session-vars -- a fresh systemd unit, a cron job, a
+  # shell open since before the rebuild -- would get a `claude` that cannot
+  # find claude. Baking it in makes the shim work anywhere, immediately.
+  #
+  # `--set-default` so an explicit CLAUDE_WRAP_CLAUDE_BIN still wins.
+  claudeShim = pkgs.runCommandLocal "claude-as-claude-wrap" {
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+  } ''
+    makeWrapper ${cfg.package}/bin/claude-wrap $out/bin/claude \
+      --set-default CLAUDE_WRAP_CLAUDE_BIN ${cfg.claudeBin}
   '';
 in
 {
@@ -171,10 +181,12 @@ in
           '';
         }
         {
-          assertion = cfg.installAsClaude -> cfg.claudePackage != null;
+          assertion = cfg.installAsClaude -> cfg.claudeBin != null;
           message = ''
-            programs.claude-clipboard-ssh.installAsClaude needs a `claude` to
-            run: set programs.claude-clipboard-ssh.claudePackage.
+            programs.claude-clipboard-ssh.installAsClaude needs to know which
+            `claude` to run, because it keeps the real one off the PATH where
+            the wrapper could otherwise have searched for it. Set
+            programs.claude-clipboard-ssh.claudePackage (or claudeBin).
           '';
         }
       ];

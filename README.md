@@ -122,8 +122,14 @@ would leave the winner up to the order of two profile directories. Setting
 wrong instead of quietly overriding what you wrote. `claudePackage` (default
 `pkgs.claude-code`) is what the wrapper then runs, by absolute path.
 
-The wrapper refuses to exec anything that resolves to itself, so being on the
-PATH under the name it searches for cannot make it recurse.
+The `claude` it installs carries the path of the real binary baked in, so it
+works in any environment the moment it is installed — no re-login, and no
+dependence on `hm-session-vars` being sourced. That matters here in a way it
+does not for the alias: with the real binary off the PATH, an unset
+`CLAUDE_WRAP_CLAUDE_BIN` would leave the wrapper with nowhere to look.
+
+The wrapper also refuses to exec anything that resolves to itself, so being
+on the PATH under the name it searches for cannot make it recurse.
 
 If `programs.claude-code` is not installing a package — it is nullable, for
 people who use it only to write settings — the module says so as a warning
