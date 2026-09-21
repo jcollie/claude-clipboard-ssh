@@ -446,19 +446,16 @@ const Paste = struct {
                 if (std.mem.eql(u8, status, "OK")) return;
 
                 if (std.mem.eql(u8, status, "DATA")) {
-                    if (packet.payload) |chunk| try p.data.appendSlice(gpa, chunk);
+                    if (packet.payload) |chunk|
+                        ccssh.appendDecodedChunk(gpa, &p.data, chunk) catch |e|
+                            log.print("undecodable chunk: {t}", .{e});
                     return;
                 }
 
                 if (std.mem.eql(u8, status, "DONE")) {
                     const mime = p.mime orelse "";
-                    const raw = ccssh.b64DecodeAlloc(gpa, p.data.items) catch |e| {
-                        log.print("undecodable clipboard payload: {t}", .{e});
-                        p.reset();
-                        giveUp(io, gpa, env, log, master);
-                        return;
-                    };
-                    defer gpa.free(raw);
+                    // Already decoded, chunk by chunk, as it arrived.
+                    const raw = p.data.items;
                     log.print("received {d} bytes of {s}", .{ raw.len, mime });
 
                     cacheWrite(io, gpa, env, mime, raw) catch |e|

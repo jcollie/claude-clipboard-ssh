@@ -389,6 +389,21 @@ pub fn b64DecodeAlloc(gpa: Allocator, src: []const u8) B64Error![]u8 {
     return out;
 }
 
+/// Append one DATA packet's payload to the accumulating clipboard data.
+///
+/// Each chunk is base64 encoded *on its own*, so the decode happens per
+/// chunk and the raw bytes are what accumulate. Concatenating the base64 and
+/// decoding once only works while there is a single chunk: the chunk size is
+/// 4096, which is not a multiple of three, so every full chunk ends in
+/// padding and a concatenation of two of them is not valid base64 at all.
+/// That failure needs an image larger than one chunk to appear, which is to
+/// say every real screenshot and no small test fixture.
+pub fn appendDecodedChunk(gpa: Allocator, out: *std.ArrayList(u8), payload: []const u8) !void {
+    const raw = try b64DecodeAlloc(gpa, payload);
+    defer gpa.free(raw);
+    try out.appendSlice(gpa, raw);
+}
+
 /// Encode base64 with padding, which is what ghostty expects in a `mime=`
 /// field. Caller owns the returned memory.
 pub fn b64EncodeAlloc(gpa: Allocator, src: []const u8) Allocator.Error![]u8 {
@@ -741,6 +756,35 @@ test "baseMime is what the cache is keyed on" {
     const name = try mimeToFileName(gpa, baseMime("text/plain;charset=utf-8"));
     defer gpa.free(name);
     try std.testing.expectEqualStrings("text_plain", name);
+}
+
+test "a chunked payload accumulates as raw bytes, not as base64" {
+    const gpa = std.testing.allocator;
+
+    // Two chunks encoded independently, which is what the terminal sends and
+    // what any single-chunk fixture fails to exercise. The first is sized so
+    // that its base64 is padded, as a full 4096-byte chunk always is.
+    const first = "A" ** 4096;
+    const second = "tail";
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+
+    const e1 = try b64EncodeAlloc(gpa, first);
+    defer gpa.free(e1);
+    const e2 = try b64EncodeAlloc(gpa, second);
+    defer gpa.free(e2);
+    try std.testing.expect(std.mem.endsWith(u8, e1, "=")); // the whole problem
+
+    try appendDecodedChunk(gpa, &out, e1);
+    try appendDecodedChunk(gpa, &out, e2);
+    try std.testing.expectEqual(first.len + second.len, out.items.len);
+    try std.testing.expectEqualStrings(first ++ second, out.items);
+
+    // And the way it used to be done is genuinely invalid, not merely lossy.
+    const joined = try std.mem.concat(gpa, u8, &.{ e1, e2 });
+    defer gpa.free(joined);
+    try std.testing.expectError(error.InvalidCharacter, b64DecodeAlloc(gpa, joined));
 }
 
 test "mimeListIterator splits the advertisement the way the terminal writes it" {
