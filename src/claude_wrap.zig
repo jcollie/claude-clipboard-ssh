@@ -22,6 +22,13 @@
 //! kitty's version of the protocol has the same shape without the password,
 //! so one mechanism covers both terminals. On any other terminal the wrapper
 //! execs `claude` directly and adds nothing at all.
+//!
+//! It also accepts drops, through kitty's drag-and-drop protocol (OSC 72).
+//! A file dropped on a local terminal is pasted as its path, which over SSH
+//! names a file on the wrong machine; so the wrapper fetches what was
+//! dropped, mirrors it into a private directory on this side, and pastes
+//! those paths instead. Claude Code takes a pasted image path as an
+//! attachment, exactly as it would locally. See `ccssh.drop`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -145,12 +152,60 @@ pub fn main(init: std.process.Init) !u8 {
     // Leaving mode 5522 on would surprise whatever runs in this terminal next.
     defer ccssh.writeAllFd(posix.STDOUT_FILENO, "\x1b[?5522l") catch {};
 
-    proxy(io, gpa, env, &log, child.master) catch |e| log.print("proxy ended: {t}", .{e});
+    var drop = try newDrop(io, gpa, env, &log);
+    defer drop.deinit();
+    // The files fetched for drops are this session's and nobody else's.
+    defer drop.cleanup();
+    acceptDrops(io, gpa, &log);
+    // As with mode 5522: the next program in this terminal did not ask.
+    defer stopAcceptingDrops(gpa);
+
+    proxy(io, gpa, env, &log, &drop, child.master) catch |e| log.print("proxy ended: {t}", .{e});
 
     g_master_fd.store(-1, .release);
     sys.close(child.master);
 
     return reap(child.pid);
+}
+
+/// The drop handler, mirroring remote drops under
+/// `<runtime>/claude-wrap-drops-<uid>/<pid>`. The pid keeps two sessions
+/// from cleaning up each other's files.
+fn newDrop(
+    io: Io,
+    gpa: Allocator,
+    env: *const std.process.Environ.Map,
+    log: *const ccssh.Logger,
+) !ccssh.drop.Drop {
+    const runtime = try ccssh.runtimeBase(io, gpa, env);
+    defer gpa.free(runtime);
+    const base = try std.fmt.allocPrint(
+        gpa,
+        "{s}/claude-wrap-drops-{d}/{d}",
+        .{ runtime, sys.getuid(), sys.getpid() },
+    );
+    defer gpa.free(base);
+    return .init(gpa, io, log, base);
+}
+
+/// Ask for drops, declaring this machine's id so that a terminal on some
+/// other machine knows to serve the dropped files' contents. A terminal
+/// without OSC 72 ignores it, so there is nothing to detect first.
+fn acceptDrops(io: Io, gpa: Allocator, log: *const ccssh.Logger) void {
+    const id = ccssh.dnd.localMachineId(io, gpa) catch return;
+    defer gpa.free(id);
+    var seq: std.ArrayList(u8) = .empty;
+    defer seq.deinit(gpa);
+    ccssh.dnd.appendCommand(gpa, &seq, "t=a:x=1", id) catch return;
+    ccssh.writeAllFd(posix.STDOUT_FILENO, seq.items) catch {};
+    log.print("accepting drops; machine id {s}", .{id});
+}
+
+fn stopAcceptingDrops(gpa: Allocator) void {
+    var seq: std.ArrayList(u8) = .empty;
+    defer seq.deinit(gpa);
+    ccssh.dnd.appendCommand(gpa, &seq, "t=A", null) catch return;
+    ccssh.writeAllFd(posix.STDOUT_FILENO, seq.items) catch {};
 }
 
 /// An escape hatch, for when the bridge is the thing in the way.
@@ -275,11 +330,11 @@ fn isExecutableFile(io: Io, path: [:0]const u8) bool {
 
 // ------------------------------------------------------------- the proxy
 
-/// Forward bytes both ways, intercepting OSC 5522 on the way in.
+/// Forward bytes both ways, intercepting OSC 5522 and OSC 72 on the way in.
 ///
 /// Output is passed through verbatim. Input is scanned for complete OSC
-/// sequences: ours are consumed and drive the state machine, everything else
-/// -- including other OSCs -- reaches `claude` untouched. A sequence split
+/// sequences: ours are consumed and drive the state machines, everything
+/// else -- including other OSCs -- reaches `claude` untouched. A sequence split
 /// across two reads is held back in `in_buf` until the rest arrives, which
 /// matters because a large paste arrives in dozens of chunks and no read
 /// lands on a packet boundary.
@@ -288,6 +343,7 @@ fn proxy(
     gpa: Allocator,
     env: *const std.process.Environ.Map,
     log: *const ccssh.Logger,
+    drop: *ccssh.drop.Drop,
     master: posix.fd_t,
 ) !void {
     var paste: Paste = .{ .gpa = gpa };
@@ -312,6 +368,16 @@ fn proxy(
                 continue;
             }
             timeout_ms = @intCast(@divTrunc(paste.deadline - now, std.time.ns_per_ms) + 1);
+        }
+        if (drop.busy()) {
+            const now = Io.Clock.awake.now(io).nanoseconds;
+            if (now >= drop.deadline) {
+                drop.timeout();
+                flushDrop(drop, master, null, gpa) catch return;
+                continue;
+            }
+            const ms: i32 = @intCast(@divTrunc(drop.deadline - now, std.time.ns_per_ms) + 1);
+            if (timeout_ms < 0 or ms < timeout_ms) timeout_ms = ms;
         }
 
         var fds = [_]posix.pollfd{
@@ -352,11 +418,17 @@ fn proxy(
                         try fwd.appendSlice(gpa, in_buf.items[cursor..span.start]);
                         const osc = in_buf.items[span.start..span.end];
                         cursor = span.end;
-                        const packet = ccssh.parse5522(osc) orelse {
+                        if (ccssh.parse5522(osc)) |packet| {
+                            try paste.handle(io, env, log, master, packet);
+                        } else if (ccssh.dnd.parse72(osc)) |packet| {
+                            drop.handle(packet);
+                            // Into `fwd` rather than straight to `master`, so
+                            // a paste the drop produced lands after whatever
+                            // was typed before it.
+                            try flushDrop(drop, master, &fwd, gpa);
+                        } else {
                             try fwd.appendSlice(gpa, osc); // someone else's OSC
-                            continue :scan;
-                        };
-                        try paste.handle(io, env, log, master, packet);
+                        }
                     },
                 }
             }
@@ -368,6 +440,29 @@ fn proxy(
             std.mem.copyForwards(u8, in_buf.items[0..rest], in_buf.items[cursor..]);
             in_buf.shrinkRetainingCapacity(rest);
         }
+    }
+}
+
+/// Send what the drop handler has queued: its escape codes to the terminal,
+/// and its paste to `claude` -- appended to `fwd` when there is one, so that
+/// it keeps its place among the forwarded bytes.
+fn flushDrop(
+    drop: *ccssh.drop.Drop,
+    master: posix.fd_t,
+    fwd: ?*std.ArrayList(u8),
+    gpa: Allocator,
+) !void {
+    if (drop.to_terminal.items.len > 0) {
+        ccssh.writeAllFd(posix.STDOUT_FILENO, drop.to_terminal.items) catch {};
+        drop.to_terminal.clearRetainingCapacity();
+    }
+    if (drop.to_child.items.len > 0) {
+        if (fwd) |f| {
+            try f.appendSlice(gpa, drop.to_child.items);
+        } else {
+            try ccssh.writeAllFd(master, drop.to_child.items);
+        }
+        drop.to_child.clearRetainingCapacity();
     }
 }
 

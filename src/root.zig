@@ -28,6 +28,13 @@ pub const pty = @import("pty.zig");
 /// without libc.
 pub const sys = @import("sys.zig");
 
+/// The kitty drag-and-drop protocol (OSC 72): its packets and the text
+/// formats it carries.
+pub const dnd = @import("dnd.zig");
+
+/// What `claude-wrap` does with a drop: fetch it, mirror it, paste it.
+pub const drop = @import("drop.zig");
+
 /// How long a cache directory written by the wrapper stays valid. The stub
 /// refuses to serve anything older, so a paste that happened minutes ago
 /// cannot be handed to `claude` as though it were the current clipboard.
@@ -49,14 +56,19 @@ pub const data_response_timeout_ns: i96 = 5 * std.time.ns_per_s;
 ///
 /// Caller owns the returned memory.
 pub fn cacheDirPath(io: Io, gpa: Allocator, env: *const std.process.Environ.Map) ![]u8 {
-    const uid = sys.getuid();
-    const base: []const u8 = blk: {
-        if (try known_folders.getPath(io, gpa, env, .runtime)) |p| break :blk p;
-        if (env.get("TMPDIR")) |p| if (p.len > 0) break :blk try gpa.dupe(u8, p);
-        break :blk try gpa.dupe(u8, "/tmp");
-    };
+    const base = try runtimeBase(io, gpa, env);
     defer gpa.free(base);
-    return std.fmt.allocPrint(gpa, "{s}/xclip-shim-{d}", .{ base, uid });
+    return std.fmt.allocPrint(gpa, "{s}/xclip-shim-{d}", .{ base, sys.getuid() });
+}
+
+/// The per-user directory that short-lived private files go under: the
+/// clipboard cache, and the files fetched for a drop.
+///
+/// Caller owns the returned memory.
+pub fn runtimeBase(io: Io, gpa: Allocator, env: *const std.process.Environ.Map) ![]const u8 {
+    if (try known_folders.getPath(io, gpa, env, .runtime)) |p| return p;
+    if (env.get("TMPDIR")) |p| if (p.len > 0) return gpa.dupe(u8, p);
+    return gpa.dupe(u8, "/tmp");
 }
 
 /// A MIME type becomes a file name by turning the *first* slash into an
@@ -248,9 +260,9 @@ pub fn findCompleteOsc(buf: []const u8, from: usize) ScanResult {
 
 // -------------------------------------------------------- OSC 5522 packets
 
-/// A parsed OSC 5522 packet. Every slice points into the buffer it was
-/// parsed from, so a `Packet` does not outlive that buffer and nothing here
-/// allocates.
+/// A parsed OSC 5522 or OSC 72 packet. Every slice points into the buffer
+/// it was parsed from, so a `Packet` does not outlive that buffer and
+/// nothing here allocates.
 pub const Packet = struct {
     meta: []const u8,
     payload: ?[]const u8,
@@ -270,18 +282,24 @@ pub const Packet = struct {
 /// Parse a complete OSC sequence as an OSC 5522 packet, or return null if it
 /// is some other OSC (which the proxy then forwards untouched).
 pub fn parse5522(osc: []const u8) ?Packet {
-    if (!std.mem.startsWith(u8, osc, "\x1b]5522;")) return null;
-    var body = osc[osc_introducer.len..];
+    return parseOsc(osc, "5522");
+}
+
+/// Parse a complete OSC sequence numbered `code` into metadata and payload,
+/// or return null if it has some other number. OSC 5522 and OSC 72 share
+/// this shape, `<code>;<meta>` or `<code>;<meta>;<payload>`.
+pub fn parseOsc(osc: []const u8, comptime code: []const u8) ?Packet {
+    const prefix = osc_introducer ++ code ++ ";";
+    if (!std.mem.startsWith(u8, osc, prefix)) return null;
+    var body = osc[prefix.len..];
     if (std.mem.endsWith(u8, body, st)) {
         body = body[0 .. body.len - st.len];
     } else if (std.mem.endsWith(u8, body, bel)) {
         body = body[0 .. body.len - bel.len];
     }
-    const rest = body["5522;".len..];
-    // "5522;<meta>" or "5522;<meta>;<payload>"
-    if (std.mem.findScalar(u8, rest, ';')) |semi|
-        return .{ .meta = rest[0..semi], .payload = rest[semi + 1 ..] };
-    return .{ .meta = rest, .payload = null };
+    if (std.mem.findScalar(u8, body, ';')) |semi|
+        return .{ .meta = body[0..semi], .payload = body[semi + 1 ..] };
+    return .{ .meta = body, .payload = null };
 }
 
 /// The pseudo-type that means "tell me what is on offer" rather than naming

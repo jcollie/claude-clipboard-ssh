@@ -11,6 +11,10 @@
 //! twice -- both silent. So: feed the scanner a stream in chunks, collect
 //! what it forwards and what it consumes in order, add whatever it is still
 //! holding back, and require the result to be the input again, exactly.
+//!
+//! The second is for what a drop hands over: whatever the URI list and the
+//! directory listings say, the names that come out of them stay inside the
+//! directory they are written to, and nothing panics on the way.
 
 const std = @import("std");
 const ccssh = @import("ccssh");
@@ -186,4 +190,48 @@ fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
     for (&chunks) |*ch| ch.* = smith.value(u8) % 64 + 1;
 
     try expectConserved(gpa, buf[0..len], &chunks);
+}
+
+test "fuzz what a drop hands over" {
+    try std.testing.fuzz({}, fuzzDrop, .{});
+}
+
+fn fuzzDrop(_: void, smith: *std.testing.Smith) anyerror!void {
+    const gpa = std.testing.allocator;
+    const dnd = ccssh.dnd;
+
+    var buf: [4096]u8 = undefined;
+    const input = buf[0..smith.slice(&buf)];
+
+    // As a URI list: every URI is a whole, trimmed, non-comment line, and
+    // every path is absolute and NUL-free.
+    var uris: dnd.UriList = .init(input);
+    while (uris.next()) |uri| {
+        try std.testing.expect(uri.len > 0 and uri[0] != '#');
+        try std.testing.expect(std.mem.findAny(u8, uri, "\r\n") == null);
+        try std.testing.expect(uri[uri.len - 1] != ' ' and uri[uri.len - 1] != '\t');
+
+        const path = dnd.filePath(gpa, uri) catch continue;
+        defer gpa.free(path);
+        try std.testing.expect(path.len > 0 and path[0] == '/');
+        try std.testing.expect(std.mem.findScalar(u8, path, 0) == null);
+        if (dnd.safeName(std.fs.path.basename(path))) |name| try expectContained(name);
+    }
+
+    // As a directory listing: entries are numbered from one with no gaps,
+    // one per NUL-separated piece, and every name kept is contained.
+    var entries: dnd.DirEntries = .init(input);
+    var expected: i32 = 1;
+    while (entries.next()) |entry| : (expected += 1) {
+        try std.testing.expectEqual(expected, entry.index);
+        if (dnd.safeName(entry.name)) |name| try expectContained(name);
+    }
+    try std.testing.expectEqual(std.mem.countScalar(u8, input, 0) + 1, @as(usize, @intCast(expected - 1)));
+}
+
+/// One path component that cannot climb out of the directory it is in.
+fn expectContained(name: []const u8) !void {
+    try std.testing.expect(name.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, ".."));
+    try std.testing.expect(std.mem.findAny(u8, name, "/\x00") == null);
 }

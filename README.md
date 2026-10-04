@@ -8,7 +8,9 @@ SPDX-License-Identifier: MIT
 
 Image paste over SSH for Claude Code, by speaking
 [OSC 5522](https://sw.kovidgoyal.net/kitty/clipboard/) to kitty or ghostty on
-the user's local machine. No patches to Claude Code itself.
+the user's local machine — and drag and drop, by speaking kitty's
+[drag-and-drop protocol](https://sw.kovidgoyal.net/kitty/dnd-protocol/)
+(OSC 72). No patches to Claude Code itself.
 
 This is a Zig port of [mindfulmonk/claude-clipboard-ssh][upstream], which
 worked out the protocol and the architecture; see [`BLOG.md`](BLOG.md) for
@@ -45,6 +47,14 @@ Two programs work around it:
 
 Together they let you paste screenshots into a `claude` session running over
 SSH.
+
+`claude-wrap` also accepts drops. Dropping a file on a local terminal pastes
+its path, and Claude Code attaches a pasted image path — but over SSH that
+path names a file on the wrong machine. So when the terminal reports that a
+drop came from another machine, the wrapper asks it for the files'
+contents, mirrors them into a private directory on the remote side, and
+pastes *those* paths. Dropping a screenshot then attaches it, just as it would
+locally; other files and whole directories arrive as paths `claude` can read.
 
 ## Install
 
@@ -192,7 +202,33 @@ overhead, so it is safe to alias:
 alias claude=claude-wrap
 ```
 
-Paste a screenshot the way you would locally. It attaches.
+Paste a screenshot the way you would locally. It attaches. Or drag one onto
+the window.
+
+### Drag and drop
+
+Drop files or directories on the terminal and `claude-wrap` pastes their
+paths into `claude`, escaped the way ghostty escapes a dropped path. An image
+path becomes an `[Image #N]` attachment.
+
+- **From another machine** (the usual case over SSH), the files are fetched
+  through the terminal into
+  `$XDG_RUNTIME_DIR/claude-wrap-drops-<uid>/<pid>/<n>/`, mode `0700`.
+  Directories are mirrored recursively and symlinks are recreated as
+  symlinks. Each drop gets its own numbered directory, so two files with the
+  same name never collide.
+- **Those copies are deleted when `claude-wrap` exits.** They are this
+  session's attachments, not a place to keep things.
+- **From the same machine**, nothing is copied: the original paths are
+  pasted.
+- Dragged text, or a URL out of a browser, is pasted as it is.
+
+The wrapper tells the terminal which machine it is on by sending the
+protocol's machine id: an HMAC of `/etc/machine-id`, or of `IOPlatformUUID`
+on a macOS remote. That id is how the terminal decides whether the drop came
+from elsewhere. If it cannot be read, the wrapper says "unknown", which the
+terminal treats as a different machine. A drop then still works, just by
+copying.
 
 ### Which key pastes
 
@@ -223,7 +259,7 @@ you already have muscle memory for is the one that works.
 | `CLAUDE_WRAP_CLAUDE_BIN` | Use this `claude` instead of searching for one. |
 | `CLAUDE_CLIPBOARD_SHIM_DIR` | Use this directory for the `xclip` stub. |
 | `CLAUDE_WRAP_DISABLE` | Do not bridge; `exec` `claude` unchanged. |
-| `XDG_RUNTIME_DIR` | Where the clipboard cache lives (resolved via known-folders). |
+| `XDG_RUNTIME_DIR` | Where the clipboard cache and dropped files live (resolved via known-folders). |
 | `XDG_STATE_HOME` | Where `claude-wrap.log` and `xclip-shim.log` are appended. |
 
 ## Architecture
@@ -250,6 +286,15 @@ both terminals.
 Ctrl+V, not a synthesised bracketed paste, is what makes Claude Code go and
 read the clipboard; bracketed paste is treated as ordinary text input.
 
+A drop works the other way round, because there a bracketed paste of a path
+*is* what Claude Code expects. The wrapper sends `OSC 72 ; t=a:x=1` with its
+machine id at startup. When a drop arrives, it asks for `text/uri-list`. If
+the terminal marks the list remote (`X=1`), the wrapper requests each entry,
+then each entry of each directory, one at a time and breadth first, writing
+them out as they stream in. Once the transfer is over it pastes the paths.
+An entry that fails costs only itself, and a transfer that goes quiet for
+five seconds is cut off, keeping whatever has already arrived.
+
 ## Development
 
 ```sh
@@ -268,7 +313,8 @@ package deliberately does not install:
 - `ccssh-probe` — raw OSC 52 / OSC 5522 sender and receiver, no `claude`.
 - `ccssh-ghostty-test` — the paste exchange in isolation; writes what it
   fetches to a file.
-- `ccssh-dump-paste` — hexdumps every byte the terminal sends on a paste.
+- `ccssh-dump-paste` — hexdumps every byte the terminal sends on a paste,
+  and the OSC 72 events a drag over the window produces.
 
 Zig dependencies are declared in `build.zig.zon` and mirrored for Nix in
 `build.zig.zon.nix`. Regenerate the latter after any dependency change:
@@ -294,6 +340,13 @@ nix develop -c zon2nix --17 --nix=build.zig.zon.nix build.zig.zon
   unmerged; the feature arrived separately.) ghostty's `clipboard-read`
   defaults to `ask`, but a paste event carries a one-time password, so the
   follow-up read is granted without a prompt.
+- Drag and drop needs OSC 72:
+  - **kitty 0.47.0 and later** serves remote drops.
+  - **ghostty**: no released version has OSC 72. Its development branch
+    handles drops, but refuses the remote file requests, so over SSH it
+    pastes the local paths unchanged.
+  - A terminal without OSC 72 ignores the wrapper's request for drops, and
+    drops behave as they always did.
 - Any other terminal: falls back to `exec`ing `claude`.
 
 **The wrapper engages whenever the terminal speaks OSC 5522**, local or
@@ -319,8 +372,15 @@ served, by the clipboard that was there all along.
   text-only. Claude Code does not appear to need image writes.
 - **One MIME type per paste in ghostty**, because the password is single-use.
   An image beats a URL if both are on the clipboard.
-- **No tmux or screen support.** OSC 5522 does not pass through a
-  multiplexer's byte filter by default.
+- **No tmux or screen support.** Neither OSC 5522 nor OSC 72 passes through
+  a multiplexer's byte filter by default.
+- **One drop at a time.** A second drop that arrives while the first is still
+  transferring is ignored.
+- **Mirrored symlinks keep their targets verbatim.** A link to an absolute
+  path on the local machine dangles on the remote one.
+- **Dropped files are copied in full before anything is pasted**, through the
+  terminal and over SSH as base64. A large drop takes a correspondingly long
+  time.
 
 ## Where this lives
 
@@ -360,10 +420,17 @@ Copyright © 2026 mindfulmonk and Jeffrey C. Ollie.
 - Goyal, Kovid. *Copying all data types to the clipboard*. kitty
   documentation. <https://sw.kovidgoyal.net/kitty/clipboard/>. The OSC 5522
   protocol definition.
+- Goyal, Kovid. *The Drag and Drop protocol*. kitty documentation.
+  <https://sw.kovidgoyal.net/kitty/dnd-protocol/>. The OSC 72 protocol
+  definition, including remote drops and the machine id.
 - Jarred-Sumner. "terminal: implement kitty clipboard protocol read path (OSC
   5522)." *ghostty* pull request 12030, 1 April 2026.
   <https://github.com/ghostty-org/ghostty/pull/12030>. Closed unmerged; the
   feature reached ghostty by another route.
+- Mealling, M., and R. Daniel. *URI Resolution Services Necessary for URN
+  Resolution*. RFC 2483, RFC Editor, January 1999.
+  <https://www.rfc-editor.org/info/rfc2483>. Defines `text/uri-list`, the
+  form a drop's files arrive in.
 - MichielMAnalytics. "Support OSC 52/5522 clipboard for image paste over SSH."
   *claude-code* issue 42712, 2 April 2026.
   <https://github.com/anthropics/claude-code/issues/42712>. Closed as not

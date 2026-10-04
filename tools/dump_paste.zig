@@ -2,15 +2,21 @@
 // SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
 // SPDX-License-Identifier: MIT
 
-//! Dump every byte the terminal sends on a paste.
+//! Dump every byte the terminal sends on a paste or a drop.
 //!
-//! Run it, paste, then press Enter. It hexdumps what arrived and points out
-//! the markers that matter. This is how you find out what trigger a TUI
-//! application actually expects -- it is what established that Claude Code
-//! responds to the Ctrl+V keystroke and not to a synthesised bracketed
-//! paste.
+//! Run it, paste or drag something over the window, then press Enter. It
+//! hexdumps what arrived and points out the markers that matter. This is
+//! how you find out what trigger a TUI application actually expects -- it
+//! is what established that Claude Code responds to the Ctrl+V keystroke
+//! and not to a synthesised bracketed paste.
+//!
+//! It asks for drops the way the wrapper does, machine id and all, so the
+//! OSC 72 move events it shows are the ones the wrapper is handed. It only
+//! listens, though, and a terminal refuses a drop until the program has
+//! answered a move, so a drag shows its moves here but never lands.
 
 const std = @import("std");
+const ccssh = @import("ccssh");
 const common = @import("common.zig");
 
 const Io = std.Io;
@@ -19,6 +25,7 @@ const markers = [_]struct { bytes: []const u8, name: []const u8 }{
     .{ .bytes = "\x1b[200~", .name = "bracketed-paste start" },
     .{ .bytes = "\x1b[201~", .name = "bracketed-paste end" },
     .{ .bytes = "\x1b]5522", .name = "OSC 5522" },
+    .{ .bytes = "\x1b]72;", .name = "OSC 72" },
     .{ .bytes = "\x1b]52;", .name = "OSC 52" },
     .{ .bytes = "\x16", .name = "Ctrl+V" },
 };
@@ -30,7 +37,15 @@ pub fn main(init: std.process.Init) !u8 {
     var tty = try common.Tty.open();
     defer tty.close();
 
-    tty.say("Ready. Paste, then press Enter to dump and exit.", .{});
+    var accept: std.ArrayList(u8) = .empty;
+    defer accept.deinit(gpa);
+    const id = try ccssh.dnd.localMachineId(io, gpa);
+    defer gpa.free(id);
+    try ccssh.dnd.appendCommand(gpa, &accept, "t=a:x=1", id);
+    tty.write(accept.items);
+    defer tty.write("\x1b]72;t=A\x1b\\");
+
+    tty.say("Ready. Paste or drop, then press Enter to dump and exit.", .{});
 
     const captured = try common.drain(io, gpa, tty.fd, .{
         .first_byte_ms = 60_000,
