@@ -119,7 +119,7 @@ test "hexdump renders a short row" {
     var w: Io.Writer = .fixed(&buf);
     try hexdump(&w, "AB\x00", 16);
     // offset, three bytes, padding out to sixteen columns, gap, ASCII.
-    const expected = "  0000  " ++ "41 42 00 " ++ ("   " ** 13) ++ " " ++ "AB." ++ "\r\n";
+    const expected = "  0000  " ++ "41 42 00 " ++ @as([3 * 13]u8, @splat(' ')) ++ " " ++ "AB." ++ "\r\n";
     try std.testing.expectEqualStrings(expected, w.buffered());
 }
 

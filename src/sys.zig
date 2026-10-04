@@ -142,7 +142,10 @@ pub fn waitpid(pid: pid_t) Error!u32 {
                 status = @bitCast(s);
                 break :blk r;
             }
-            break :blk std.os.linux.wait4(pid, &status, 0, null);
+            var s: i32 = 0;
+            const r = std.os.linux.wait4(pid, &s, 0, null);
+            status = @bitCast(s);
+            break :blk r;
         };
         switch (posix.errno(rc)) {
             .SUCCESS => return status,

@@ -184,7 +184,7 @@ fn reap(pid: posix.pid_t) u8 {
 /// Caller owns the returned memory (an arena, in practice).
 fn findRealClaude(io: Io, arena: Allocator, env: *const std.process.Environ.Map) !?[:0]const u8 {
     if (env.get("CLAUDE_WRAP_CLAUDE_BIN")) |p| {
-        if (p.len > 0) return try arena.dupeZ(u8, p);
+        if (p.len > 0) return try arena.dupeSentinel(u8, p, 0);
     }
 
     if (env.get("HOME")) |home| {

@@ -74,7 +74,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "ccssh", .module = ccssh }},
     });
-    const fuzz_tests = b.addTest(.{ .root_module = fuzz_mod });
+    // LLVM, because the self-hosted backend Debug uses by default emits no
+    // coverage instrumentation, and `zig build test --fuzz` then has nothing
+    // to steer by.
+    const fuzz_tests = b.addTest(.{ .root_module = fuzz_mod, .use_llvm = true });
     test_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
     check_step.dependOn(&fuzz_tests.step);
 
@@ -150,7 +153,7 @@ pub fn build(b: *std.Build) void {
     // disagree about nothing. Explicit paths rather than `.`, so the step is
     // immune to `zig-pkg/` and `zig-out/` being present.
     const fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "src", "tests", "tools" },
+        .paths = &.{ b.path("build.zig"), b.path("src"), b.path("tests"), b.path("tools") },
         .check = true,
     });
     const fmt_step = b.step("fmt", "Check that the Zig sources are formatted");

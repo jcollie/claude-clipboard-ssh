@@ -253,9 +253,10 @@ read the clipboard; bracketed paste is treated as ordinary text input.
 ## Development
 
 ```sh
-nix develop            # zig 0.16, reuse, zon2nix
+nix develop            # zig 0.17, reuse, zon2nix
 zig build              # all five programs into zig-out
 zig build test         # unit tests and the scanner property test
+zig build test --fuzz  # fuzz the scanner, until interrupted
 zig build check        # compile everything without running it
 zig build fmt          # zig fmt --check
 reuse lint             # licensing compliance
@@ -273,7 +274,7 @@ Zig dependencies are declared in `build.zig.zon` and mirrored for Nix in
 `build.zig.zon.nix`. Regenerate the latter after any dependency change:
 
 ```sh
-nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
+nix develop -c zon2nix --17 --nix=build.zig.zon.nix build.zig.zon
 ```
 
 ## Compatibility

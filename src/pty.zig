@@ -118,7 +118,7 @@ fn openPt(out: *SlavePath) Error!posix.fd_t {
         var number: c_uint = 0;
         sys.ioctl(master, TIOCGPTN, @intFromPtr(&number)) catch return error.PtsNameFailed;
 
-        _ = std.fmt.bufPrintZ(&out.buf, "/dev/pts/{d}", .{number}) catch return error.PtsNameFailed;
+        _ = std.fmt.bufPrintSentinel(&out.buf, "/dev/pts/{d}", .{number}, 0) catch return error.PtsNameFailed;
     } else if (is_darwin) {
         sys.ioctl(master, TIOCPTYGRANT, 0) catch return error.GrantPtFailed;
         sys.ioctl(master, TIOCPTYUNLK, 0) catch return error.UnlockPtFailed;
@@ -208,8 +208,8 @@ pub const RawMode = struct {
         raw.lflag.IEXTEN = false;
         raw.cflag.CSIZE = .CS8;
         raw.cflag.PARENB = false;
-        raw.cc[@intFromEnum(posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+        raw.cc[@backingInt(posix.V.MIN)] = 1;
+        raw.cc[@backingInt(posix.V.TIME)] = 0;
         try posix.tcsetattr(fd, .FLUSH, raw);
         return .{ .fd = fd, .orig = orig };
     }

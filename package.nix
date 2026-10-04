@@ -5,12 +5,12 @@
   lib,
   stdenv,
   callPackage,
-  zig_0_16,
+  zig_0_17,
 }:
 
 let
   # Generated from build.zig.zon by zon2nix; regenerate with
-  #   nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
+  #   nix develop -c zon2nix --17 --nix=build.zig.zon.nix build.zig.zon
   zigDeps = callPackage ./build.zig.zon.nix { };
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -30,7 +30,7 @@ stdenv.mkDerivation (finalAttrs: {
     ];
   };
 
-  nativeBuildInputs = [ zig_0_16 ];
+  nativeBuildInputs = [ zig_0_17 ];
 
   zigBuildFlags = [
     "--system"

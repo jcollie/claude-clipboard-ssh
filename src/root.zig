@@ -467,15 +467,15 @@ pub fn targetToMime(target: []const u8) []const u8 {
 
 pub fn isGhostty(env: *const std.process.Environ.Map) bool {
     if (env.get("GHOSTTY_RESOURCES_DIR")) |v| if (v.len > 0) return true;
-    if (env.get("TERM_PROGRAM")) |v| if (std.ascii.indexOfIgnoreCase(v, "ghostty") != null) return true;
-    if (env.get("TERM")) |v| if (std.ascii.indexOfIgnoreCase(v, "ghostty") != null) return true;
+    if (env.get("TERM_PROGRAM")) |v| if (std.ascii.findIgnoreCase(v, "ghostty") != null) return true;
+    if (env.get("TERM")) |v| if (std.ascii.findIgnoreCase(v, "ghostty") != null) return true;
     return false;
 }
 
 pub fn isKitty(env: *const std.process.Environ.Map) bool {
     if (env.get("KITTY_WINDOW_ID")) |v| if (v.len > 0) return true;
     if (env.get("KITTY_PID")) |v| if (v.len > 0) return true;
-    if (env.get("TERM")) |v| if (std.ascii.indexOfIgnoreCase(v, "kitty") != null) return true;
+    if (env.get("TERM")) |v| if (std.ascii.findIgnoreCase(v, "kitty") != null) return true;
     return false;
 }
 
@@ -764,13 +764,13 @@ test "a chunked payload accumulates as raw bytes, not as base64" {
     // Two chunks encoded independently, which is what the terminal sends and
     // what any single-chunk fixture fails to exercise. The first is sized so
     // that its base64 is padded, as a full 4096-byte chunk always is.
-    const first = "A" ** 4096;
+    const first: [4096]u8 = @splat('A');
     const second = "tail";
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    const e1 = try b64EncodeAlloc(gpa, first);
+    const e1 = try b64EncodeAlloc(gpa, &first);
     defer gpa.free(e1);
     const e2 = try b64EncodeAlloc(gpa, second);
     defer gpa.free(e2);

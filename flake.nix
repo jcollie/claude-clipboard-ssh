@@ -32,31 +32,6 @@
       inherit (nixpkgs) lib;
       makePackages = system: import nixpkgs { inherit system; };
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;
-
-      fuzzableZig =
-        pkgs:
-        let
-          library = pkgs.runCommand "zig-0.16.0-lib-fuzz-fix" { } ''
-            cp -rs --no-preserve=mode ${pkgs.zig_0_16}/lib/zig $out
-            chmod -R u+w $out
-            rm $out/compiler/test_runner.zig
-            cp --no-preserve=mode \
-              ${pkgs.zig_0_16}/lib/zig/compiler/test_runner.zig \
-              $out/compiler/test_runner.zig
-            substituteInPlace $out/compiler/test_runner.zig \
-              --replace-fail \
-                'std.debug.writeStackTrace(trace, stderr)' \
-                'std.debug.writeErrorReturnTrace(trace, stderr)'
-          '';
-        in
-        pkgs.symlinkJoin {
-          name = "zig-0.16.0-fuzzable";
-          paths = [ pkgs.zig_0_16 ];
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          postBuild = ''
-            wrapProgram $out/bin/zig --set ZIG_LIB_DIR ${library}
-          '';
-        };
     in
     {
       packages = forAllSystems (
@@ -167,7 +142,7 @@
           default = pkgs.mkShell {
             name = "claude-clipboard-ssh";
             nativeBuildInputs = [
-              (fuzzableZig pkgs)
+              pkgs.zig_0_17
               pkgs.reuse
             ]
             ++ lib.optional (zon2nix.packages ? ${system}) (pkgs.symlinkJoin {
@@ -176,7 +151,7 @@
               nativeBuildInputs = [ pkgs.makeWrapper ];
               postBuild = ''
                 wrapProgram $out/bin/zon2nix \
-                  --prefix PATH : ${lib.makeBinPath [ pkgs.zig_0_16 ]}
+                  --prefix PATH : ${lib.makeBinPath [ pkgs.zig_0_17 ]}
               '';
             });
           };
