@@ -27,23 +27,34 @@ let
   # only to write settings, with claude installed by other means.
   claudeCodeProvidesPackage = claudeCode.enable && claudeCode.package != null;
 
-  # `claude` on the PATH, but it is the wrapper, carrying the path of the
-  # real binary with it.
+  # The package actually installed: `claude-wrap`, and with `installAsClaude`
+  # also `claude`, each carrying the path of the real binary baked in.
   #
-  # Not a bare symlink and not a reliance on home.sessionVariables: with
-  # `installAsClaude` the real `claude` is deliberately off the PATH, so the
-  # environment variable is the wrapper's only route to it, and anything that
-  # does not source hm-session-vars -- a fresh systemd unit, a cron job, a
-  # shell open since before the rebuild -- would get a `claude` that cannot
-  # find claude. Baking it in makes the shim work anywhere, immediately.
+  # Baked in rather than exported through home.sessionVariables, because an
+  # exported store path goes stale. hm-session-vars is read once per login,
+  # and from there the value is copied into the systemd user manager's
+  # environment and inherited by everything it starts -- a terminal, and so
+  # every shell opened in it. After a switch to a new claude-code, all of
+  # those kept handing the wrapper the old store path until the next logout.
+  # A path in the wrapper script changes the moment the generation does.
   #
-  # `--set-default` so an explicit CLAUDE_WRAP_CLAUDE_BIN still wins.
-  claudeShim = pkgs.runCommandLocal "claude-as-claude-wrap" {
+  # `--set`, not `--set-default`, for the same reason: a stale
+  # CLAUDE_WRAP_CLAUDE_BIN inherited from a session that predates this module
+  # would otherwise still win. To run a different `claude`, set `claudeBin`.
+  #
+  # Both names are wrapped, so the alias and `installAsClaude` behave alike.
+  # With `installAsClaude` the real `claude` is off the PATH, so this is the
+  # wrapper's only route to it; with the alias it saves a search that would
+  # look in ~/.local/share/claude/versions before the PATH.
+  wrappedPackage = pkgs.runCommandLocal "claude-clipboard-ssh-wrapped" {
     nativeBuildInputs = [ pkgs.makeWrapper ];
-  } ''
+  } (''
+    makeWrapper ${cfg.package}/bin/claude-wrap $out/bin/claude-wrap \
+      --set CLAUDE_WRAP_CLAUDE_BIN ${cfg.claudeBin}
+  '' + lib.optionalString cfg.installAsClaude ''
     makeWrapper ${cfg.package}/bin/claude-wrap $out/bin/claude \
-      --set-default CLAUDE_WRAP_CLAUDE_BIN ${cfg.claudeBin}
-  '';
+      --set CLAUDE_WRAP_CLAUDE_BIN ${cfg.claudeBin}
+  '');
 in
 {
   options.programs.claude-clipboard-ssh = {
@@ -118,7 +129,9 @@ in
       '';
       description = ''
         The {command}`claude` executable {command}`claude-wrap` should run,
-        exported as {env}`CLAUDE_WRAP_CLAUDE_BIN`.
+        baked into the installed wrapper. It is deliberately not exported as
+        a session variable: a store path held in a login session's
+        environment outlives the generation it came from.
 
         Taken from {option}`programs.claude-code.finalPackage` by default, so
         the wrapper runs the same Claude Code that module installed --
@@ -163,7 +176,7 @@ in
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
-      home.packages = [ cfg.package ] ++ lib.optional cfg.installAsClaude claudeShim;
+      home.packages = [ (if cfg.claudeBin != null then wrappedPackage else cfg.package) ];
 
       assertions = [
         {
@@ -199,10 +212,6 @@ in
         programs.claude-clipboard-ssh.claudeBin to be explicit about it.
       '';
     }
-
-    (lib.mkIf (cfg.claudeBin != null) {
-      home.sessionVariables.CLAUDE_WRAP_CLAUDE_BIN = cfg.claudeBin;
-    })
 
     (lib.mkIf cfg.aliasClaude {
       programs.bash.shellAliases.claude = "claude-wrap";

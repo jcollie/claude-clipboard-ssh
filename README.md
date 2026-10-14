@@ -91,7 +91,11 @@ That is the whole configuration. `claude-wrap` is told to run exactly the
 `claude` that `programs.claude-code` installed, by way of its
 `finalPackage` — so the wrapper does not have to guess, which is otherwise
 the fragile part: left alone it searches `~/.local/share/claude/versions`,
-`~/.claude/local` and then the `PATH`. `claude` is also aliased to
+`~/.claude/local` and then the `PATH`. The path is baked into the installed
+`claude-wrap` rather than exported as a session variable, so it follows each
+home-manager switch at once; an exported store path would be held by the
+login session, and by everything the systemd user manager starts, until the
+next logout. `claude` is also aliased to
 `claude-wrap` in every enabled shell, which is safe as a blanket alias
 because the wrapper `exec`s straight through on a terminal without OSC 5522.
 
@@ -100,7 +104,7 @@ because the wrapper `exec`s straight through on a terminal without OSC 5522.
 | `enable` | `false` | |
 | `package` | this flake's | The package to install. |
 | `claudePackage` | `pkgs.claude-code` | Where to find `claude` when `programs.claude-code` installs none. Not added to `home.packages`. |
-| `claudeBin` | from the above | The `claude` to run, exported as `CLAUDE_WRAP_CLAUDE_BIN`. `null` lets the wrapper search. |
+| `claudeBin` | from the above | The `claude` to run, baked into the installed wrapper. `null` lets the wrapper search. |
 | `installAsClaude` | `false` | Install the wrapper *as* `claude`; see below. |
 | `aliasClaude` | `!installAsClaude` | Alias `claude` to `claude-wrap` in bash, zsh and fish. |
 | `kittyClipboardControl` | `false` | Set kitty's `clipboard_control` to allow reads without a prompt. Only meaningful on the machine you sit at. |
@@ -132,11 +136,11 @@ would leave the winner up to the order of two profile directories. Setting
 wrong instead of quietly overriding what you wrote. `claudePackage` (default
 `pkgs.claude-code`) is what the wrapper then runs, by absolute path.
 
-The `claude` it installs carries the path of the real binary baked in, so it
-works in any environment the moment it is installed — no re-login, and no
-dependence on `hm-session-vars` being sourced. That matters here in a way it
-does not for the alias: with the real binary off the PATH, an unset
-`CLAUDE_WRAP_CLAUDE_BIN` would leave the wrapper with nowhere to look.
+The `claude` it installs carries the path of the real binary baked in, just
+as `claude-wrap` does, so it works in any environment the moment it is
+installed — no re-login, and no dependence on `hm-session-vars` being
+sourced. That matters more here than for the alias: with the real binary off
+the PATH, the wrapper would otherwise have nowhere to look.
 
 The wrapper also refuses to exec anything that resolves to itself, so being
 on the PATH under the name it searches for cannot make it recurse.
@@ -256,7 +260,7 @@ you already have muscle memory for is the one that works.
 
 | Variable | Effect |
 | --- | --- |
-| `CLAUDE_WRAP_CLAUDE_BIN` | Use this `claude` instead of searching for one. |
+| `CLAUDE_WRAP_CLAUDE_BIN` | Use this `claude` instead of searching for one. The home-manager module sets it in the installed wrapper, overriding any inherited value; set `claudeBin` there instead. |
 | `CLAUDE_CLIPBOARD_SHIM_DIR` | Use this directory for the `xclip` stub. |
 | `CLAUDE_WRAP_DISABLE` | Do not bridge; `exec` `claude` unchanged. |
 | `XDG_RUNTIME_DIR` | Where the clipboard cache and dropped files live (resolved via known-folders). |
